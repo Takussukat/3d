@@ -67,8 +67,9 @@ def main():
     python = ROOT / 'venv/bin/python'
     run([python, '-m', 'pip', 'install', '-q', 'torch==2.6.0', 'torchvision==0.21.0',
          '--index-url', 'https://download.pytorch.org/whl/cu124'])
+    # opencv : importe par o_voxel, necessaire au test d'import final.
     run([python, '-m', 'pip', 'install', '-q', 'setuptools>=64', 'wheel', 'ninja', 'numpy',
-         'plyfile', 'trimesh', 'tqdm', 'zstandard', 'easydict'])
+         'plyfile', 'trimesh', 'tqdm', 'zstandard', 'easydict', 'opencv-python-headless'])
     report['torch'] = output([python, '-c', 'import torch; print(torch.__version__, torch.version.cuda)'])
 
     env = dict(os.environ, TORCH_CUDA_ARCH_LIST='7.5', MAX_JOBS=str(os.cpu_count() or 4),
