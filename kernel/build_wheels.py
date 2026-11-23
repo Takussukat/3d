@@ -22,7 +22,11 @@ SOURCES = {
     'nvdiffrast': ('https://github.com/NVlabs/nvdiffrast.git', 'v0.4.0', ''),
 }
 
+# L'image Kaggle fournit nvcc 13.x ; torch 2.6.0+cu124 exige le meme CUDA majeur (12).
+CUDA_URL = ('https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/'
+            'cuda_12.4.1_550.54.15_linux.run')
 ROOT = pathlib.Path('/kaggle/temp/build-wheels')
+CUDA_HOME = ROOT / 'cuda-12.4'
 OUT = pathlib.Path('/kaggle/working/wheels')
 REPORT = pathlib.Path('/kaggle/working/build_report.json')
 report = dict(status='starting', wheels={}, errors={})
@@ -46,8 +50,16 @@ def output(args):
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
-    report['nvcc'] = output(['bash', '-lc', 'nvcc --version | tail -2'])
+    report['system_nvcc'] = output(['bash', '-lc', 'nvcc --version | tail -1'])
     report['gpu'] = output(['nvidia-smi', '--query-gpu=name,compute_cap', '--format=csv,noheader'])
+    save('installing_cuda')
+    if not (CUDA_HOME / 'bin/nvcc').is_file():
+        installer = ROOT / 'cuda.run'
+        run(['wget', '-q', '-O', installer, CUDA_URL])
+        run(['sh', installer, '--silent', '--toolkit', f'--toolkitpath={CUDA_HOME}',
+             '--no-opengl-libs', '--no-man-page', '--no-drm', f'--tmpdir={ROOT}'])
+        installer.unlink()
+    report['nvcc'] = output([CUDA_HOME / 'bin/nvcc', '--version']).splitlines()[-1]
     save('installing')
 
     run([sys.executable, '-m', 'pip', 'install', '-q', 'uv'])
@@ -60,9 +72,11 @@ def main():
     report['torch'] = output([python, '-c', 'import torch; print(torch.__version__, torch.version.cuda)'])
 
     env = dict(os.environ, TORCH_CUDA_ARCH_LIST='7.5', MAX_JOBS=str(os.cpu_count() or 4),
-               BUILD_TARGET='cuda')
-    # Le venv doit fournir ninja et torch au build (--no-build-isolation).
-    env['PATH'] = f"{ROOT / 'venv/bin'}:{env['PATH']}"
+               BUILD_TARGET='cuda', CUDA_HOME=str(CUDA_HOME), CUDA_PATH=str(CUDA_HOME))
+    # Le venv doit fournir ninja et torch au build (--no-build-isolation), et nvcc 12.4 passe
+    # devant celui du systeme.
+    env['PATH'] = f"{ROOT / 'venv/bin'}:{CUDA_HOME / 'bin'}:{env['PATH']}"
+    env['LD_LIBRARY_PATH'] = f"{CUDA_HOME / 'lib64'}:{env.get('LD_LIBRARY_PATH', '')}"
     save('building')
     for name, (url, revision, subdir) in SOURCES.items():
         started = time.monotonic()
@@ -72,7 +86,7 @@ def main():
                 run(['git', 'clone', '--recursive', url, checkout])
             run(['git', 'checkout', revision], cwd=checkout)
             run(['git', 'submodule', 'update', '--init', '--recursive'], cwd=checkout)
-            run([python, '-m', 'pip', 'wheel', '--no-build-isolation', '--no-deps', '-w', OUT,
+            run([python, '-m', 'pip', 'wheel', '-v', '--no-build-isolation', '--no-deps', '-w', OUT,
                  checkout / subdir], env=env)
             built = sorted(p.name for p in OUT.glob(name + '-*.whl'))
             if len(built) != 1:
