@@ -52,3 +52,4 @@ Options : `--seed` (autre variante), `--steps` (étapes SDXL), `--dry-run` (pré
 - Compter ~1 à 2 h par objet (installation comprise) ; le quota GPU Kaggle est d'environ 30 h par semaine.
 - « Réparé » ne veut pas dire « imprimable » : vérifiez l'épaisseur des parois et les surplombs dans votre slicer.
 - SDXL (licence CreativeML OpenRAIL++-M) ; pour un autre modèle compatible SDXL, modifiez `image_model` dans `DEFAULTS`.
+- Détourage : BiRefNet public (`ZhengPeng7/BiRefNet`, licence MIT). Le modèle prévu par Microsoft, `briaai/RMBG-2.0`, est sous licence non commerciale et n'est volontairement pas utilisé. Avant de vendre des STL, vérifiez aussi la licence de DINOv3.

@@ -49,6 +49,7 @@ RESOLUTION = 1024
 REVISION = '75fbf0183001ed9876c8dbb35de6b68552ee08bd'
 ENCODER_BYTES = 1212559808
 CHUNK = 65536
+BACKGROUND_MODEL = 'ZhengPeng7/BiRefNet'   # licence MIT, usage commercial autorise
 
 ROOT = pathlib.Path('/kaggle/temp/stl-factory')
 OUT = pathlib.Path('/kaggle/working') / SLUG
@@ -206,15 +207,10 @@ def infer():
     pipe.shape_slat_normalization = cfg['shape_slat_normalization']
     pipe.image_cond_model = DinoV3FeatureExtractor(str(encoder_folder()))
     from trellis2.pipelines.rembg import BiRefNet
-    rembg_spec = cfg['rembg_model']
-    try:
-        pipe.rembg_model = BiRefNet(**rembg_spec['args'])
-        background_model = rembg_spec['args']['model_name']
-    except Exception as exc:
-        # Le checkpoint BRIA configure peut exiger une licence/connexion HF separee.
-        print(f'Modele de fond indisponible ({type(exc).__name__}) ; BiRefNet public', flush=True)
-        background_model = 'ZhengPeng7/BiRefNet'
-        pipe.rembg_model = BiRefNet(background_model)
+    # Detourage : BiRefNet public (licence MIT). Le modele configure par Microsoft,
+    # briaai/RMBG-2.0, est sous licence non commerciale : ne pas l'utiliser pour des STL vendus.
+    background_model = BACKGROUND_MODEL
+    pipe.rembg_model = BiRefNet(background_model)
     pipe.low_vram = True
     pipe._device = torch.device('cuda:0')
     for name, model in pipe.models.items():
