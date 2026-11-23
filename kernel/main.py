@@ -32,6 +32,7 @@ DEFAULTS = dict(
     image_steps=30,
     guidance=7.0,
     simplify_faces=3_000_000,
+    stop_after=None,             # 'image' : s'arrete apres reference.png (test SDXL)
 )
 JOB = {**DEFAULTS, **JOB, **json.loads(os.environ.get('STL_JOB', '{}'))}
 
@@ -103,7 +104,11 @@ def bootstrap():
         raise ValueError(f"mode inconnu : {JOB['mode']}")
     if JOB['mode'] == 'text' and not JOB['prompt']:
         raise ValueError('Mode texte sans prompt')
-    encoder_folder()
+    image_only = JOB['stop_after'] == 'image'
+    if image_only and JOB['mode'] != 'text':
+        raise ValueError("stop_after='image' n'a de sens qu'en mode texte")
+    if not image_only:
+        encoder_folder()
     if JOB['mode'] == 'image':
         found = list(pathlib.Path('/kaggle/input').rglob('reference.png'))
         if len(found) != 1:
@@ -123,6 +128,16 @@ def bootstrap():
          'zstandard', 'imageio', 'imageio-ffmpeg', 'matplotlib', 'kornia', 'rtree',
          'pymeshfix==0.17.1',
          'git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8'])
+    me = pathlib.Path(__file__).resolve()
+    if image_only:
+        # Test de l'etape SDXL seule : ni wheels, ni encodeur, ni TRELLIS.2.
+        started = time.monotonic()
+        run([python, '-u', me], env=dict(os.environ, STL_JOB=json.dumps(JOB), STL_STAGE='image'),
+            timeout=1800)
+        record('finished', file='summary.json', stopped_after='image',
+               files=sorted(p.name for p in OUT.iterdir() if p.is_file()),
+               total_seconds=round(time.monotonic() - started))
+        return
     wheels = []
     for prefix in ('cumesh-', 'o_voxel-', 'flex_gemm-', 'nvdiffrast-'):
         matches = list(pathlib.Path('/kaggle/input').rglob(prefix + '*.whl'))
@@ -135,7 +150,6 @@ def bootstrap():
         run(['git', 'clone', 'https://github.com/microsoft/TRELLIS.2.git', repo])
     run(['git', 'checkout', REVISION], cwd=repo)
 
-    me = pathlib.Path(__file__).resolve()
     env = dict(os.environ, PYTHONPATH=str(repo), STL_JOB=json.dumps(JOB))
     started = time.monotonic()
     if JOB['mode'] == 'text':

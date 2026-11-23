@@ -59,6 +59,8 @@ def build_kernel(job, user, args):
     build.mkdir(parents=True)
     (build / 'main.py').write_text(source, encoding='utf-8')
     datasets = [f'{user}/{args.wheels_dataset}', f'{user}/{args.encoder_dataset}']
+    if job.get('stop_after') == 'image':
+        datasets = []                      # test SDXL : aucun dataset requis
     if job['mode'] == 'image':
         datasets.append(f'{user}/{args.input_dataset}')
     metadata = dict(
@@ -155,6 +157,7 @@ def main():
         p.add_argument('--seed', type=int, default=42)
         p.add_argument('--steps', type=int, default=30, help="etapes SDXL (mode texte)")
         p.add_argument('--no-wait', action='store_true', help='ne pas attendre la fin')
+        p.add_argument('--jusqua', choices=['image'], help="s'arreter apres une etape (test)")
         p.add_argument('--dry-run', action='store_true', help='preparer sans rien envoyer')
     sub.add_parser('statut')
     p = sub.add_parser('recuperer')
@@ -172,6 +175,10 @@ def main():
 
     job = dict(mode='text' if args.command == 'texte' else 'image', name=args.name,
                size_mm=args.size, seed=args.seed, image_steps=args.steps)
+    if args.jusqua:
+        if args.command != 'texte':
+            sys.exit('--jusqua image ne sert qu\'en mode texte')
+        job['stop_after'] = args.jusqua
     if args.command == 'texte':
         job['prompt'] = args.source
     else:
