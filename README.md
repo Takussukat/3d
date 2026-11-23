@@ -47,7 +47,7 @@ Options : `--seed` (autre variante), `--steps` (étapes SDXL), `--dry-run` (pré
 
 ## Limites
 
-- **Pas encore testé de bout en bout sur Kaggle.** L'étape TRELLIS reprend votre kernel validé ; l'étape SDXL et le lanceur sont nouveaux.
+- Testé de bout en bout sur Kaggle (troll de 60 mm : ~12 min après l'installation). La réparation CPU actuelle a été validée en local sur ce maillage : étanche, 0 arête non-manifold.
 - Un seul travail à la fois par kernel : chaque envoi crée une nouvelle version de `stl-factory`. Pour en lancer plusieurs en parallèle, utilisez `--kernel stl-factory-2`.
 - Compter ~1 à 2 h par objet (installation comprise) ; le quota GPU Kaggle est d'environ 30 h par semaine.
 - « Réparé » ne veut pas dire « imprimable » : vérifiez l'épaisseur des parois et les surplombs dans votre slicer.

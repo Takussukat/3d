@@ -305,9 +305,11 @@ def infer():
     gpu_mesh.simplify(int(JOB['simplify_faces']), verbose=True)
     v, f = gpu_mesh.read()
     mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy(), process=False)
-    # Y-up -> Z-up, puis plus grande dimension = SIZE mm.
-    mesh.vertices = mesh.vertices[:, [0, 2, 1]] * np.array([1, -1, 1])
+    # TRELLIS.2 sort deja en Z vers le haut (verifie sur un rendu : pieds en bas). Plus grande
+    # dimension = SIZE mm, objet centre en X/Y et pose sur le plateau (Z min = 0).
     mesh.apply_scale(SIZE / float(mesh.extents.max()))
+    low, high = mesh.bounds
+    mesh.apply_translation([-(low[0] + high[0]) / 2, -(low[1] + high[1]) / 2, -low[2]])
     mesh.export(RAW_STL)
     mesh.export(OUT / f'{SLUG}.glb')
     record('mesh_ready', vertices=len(mesh.vertices), faces=len(mesh.faces), raw=raw_stats,
@@ -420,30 +422,140 @@ def mesh_stats(mesh):
                 extents_mm=mesh.extents.tolist())
 
 
+def pair_half_edges(vertices, faces):
+    """Apparie chaque demi-arete a->b avec une demi-arete b->a de la meme arete.
+
+    Demi-arete h = coin 3f+k : du sommet faces[f,k] vers faces[f,k+1].
+    Aux aretes a 4 ou 6 faces (nappes qui se touchent), on apparie selon la geometrie : autour
+    de l'axe a->b, la normale d'une face a->b pointe vers les angles croissants, donc sa matiere
+    est fermee par la face b->a qui la precede dans l'ordre angulaire.
+    Renvoie (fwd, bwd, multiple) : demi-aretes appariees, et vrai si l'arete avait plus de 2 faces.
+    """
+    import numpy as np
+    he_from, he_to = faces.reshape(-1), faces[:, [1, 2, 0]].reshape(-1)
+    third = faces[:, [2, 0, 1]].reshape(-1)
+    lo, hi = np.minimum(he_from, he_to), np.maximum(he_from, he_to)
+    forward = he_from < he_to
+    order = np.lexsort((~forward, hi, lo))
+    key = lo[order] * (len(vertices) + 1) + hi[order]
+    start = np.r_[0, np.flatnonzero(np.diff(key)) + 1]
+    count = np.diff(np.r_[start, len(key)])
+    nfwd = np.add.reduceat(forward[order].astype(np.int64), start)
+    out = [], [], []
+    for c in np.unique(count):
+        sel = start[(count == c) & (nfwd * 2 == c)]
+        if c < 2 or not len(sel):
+            continue
+        half = c // 2
+        he = order[sel[:, None] + np.arange(c)]              # (groupes, c) : a->b puis b->a
+        fwd, bwd = he[:, :half].ravel(), he[:, half:].ravel()
+        if c > 2:
+            a, b = vertices[lo[he[:, 0]]], vertices[hi[he[:, 0]]]
+            u = (b - a) / np.linalg.norm(b - a, axis=1, keepdims=True)
+            e1 = np.cross(u, [0.577, 0.577, 0.577]); e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+            e2 = np.cross(u, e1)
+            d = vertices[third[he]] - a[:, None]
+            angle = np.arctan2((d * e2[:, None]).sum(-1), (d * e1[:, None]).sum(-1))
+            ranked = np.argsort(angle, axis=1)
+            previous = np.roll(ranked, 1, axis=1)
+            rows = np.arange(len(he))[:, None]
+            prev_of = np.take_along_axis(previous, ranked.argsort(1), 1)   # predecesseur de chaque face
+            ok = np.repeat((prev_of[:, :half] >= half).all(1), half)
+            is_fwd = ranked < half
+            fwd = np.where(ok, he[rows, ranked][is_fwd], fwd)
+            bwd = np.where(ok, he[rows, previous][is_fwd], bwd)
+        out[0].append(fwd); out[1].append(bwd); out[2].append(np.full(len(fwd), c > 2))
+    return [np.concatenate(x) for x in out]
+
+
+def split_vertices(vertices, faces, gap):
+    """Donne une copie de sommet par eventail de coins relies par des aretes appariees.
+
+    Le STL n'ayant pas d'indices, chaque copie d'un sommet dedouble recule de `gap` vers
+    l'interieur de sa nappe, sinon les slicers la refusionneraient.
+    """
+    import numpy as np
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    n = len(faces)
+    fwd, bwd, _ = pair_half_edges(vertices, faces)
+    nxt = lambda h: (h // 3) * 3 + (h % 3 + 1) % 3      # coin a l'extremite de la demi-arete
+    # Demi-arete f: a->b, g: b->a. Coin de f en a == coin de g en a (extremite de g), idem en b.
+    rows, cols = np.r_[fwd, nxt(fwd)], np.r_[nxt(bwd), bwd]
+    graph = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(3 * n, 3 * n))
+    ncomp, label = connected_components(graph, directed=False)
+    original = faces.reshape(-1)
+    new_vertices = np.empty((ncomp, 3)); new_vertices[label] = vertices[original]
+    new_faces = label.reshape(n, 3)
+    source = np.empty(ncomp, dtype=np.int64); source[label] = original
+    split = np.bincount(source, minlength=len(vertices))[source] > 1
+    tri = new_vertices[new_faces]
+    normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])   # ponderees par l'aire
+    fan = np.zeros((ncomp, 3)); np.add.at(fan, new_faces.reshape(-1), np.repeat(normals, 3, axis=0))
+    length = np.linalg.norm(fan, axis=1, keepdims=True)
+    move = split & (length[:, 0] > 0)
+    new_vertices[move] -= gap * fan[move] / length[move]
+    return new_vertices, new_faces, int(split.sum())
+
+
+def split_pinched_edges(vertices, faces, gap):
+    """Aretes encore partagees par 4+ faces (sommets non dedoublables) : chaque paire de faces
+    recoit son propre point milieu, en retrait vers l'interieur de sa nappe."""
+    import numpy as np
+    fwd, bwd, multiple = pair_half_edges(vertices, faces)
+    fwd, bwd = fwd[multiple], bwd[multiple]
+    if not len(fwd):
+        return vertices, faces, 0
+    def corners(h):
+        f, k = h // 3, h % 3
+        return f, faces[f, k], faces[f, (k + 1) % 3], faces[f, (k + 2) % 3]
+    f, a, b, cf = corners(fwd)
+    g, _, _, cg = corners(bwd)                           # g : b->a, sommet oppose cg
+    va, vb = vertices[a], vertices[b]
+    nf = np.cross(vb - va, vertices[cf] - va); ng = np.cross(va - vb, vertices[cg] - vb)
+    inward = (nf / np.linalg.norm(nf, axis=1, keepdims=True)
+              + ng / np.linalg.norm(ng, axis=1, keepdims=True))
+    inward /= np.maximum(np.linalg.norm(inward, axis=1, keepdims=True), 1e-12)
+    mid = np.arange(len(vertices), len(vertices) + len(fwd))
+    vertices = np.vstack([vertices, (va + vb) / 2 - gap * inward])
+    keep = np.ones(len(faces), bool); keep[f] = keep[g] = False
+    faces = np.vstack([faces[keep],
+                       np.c_[a, mid, cf], np.c_[mid, b, cf],      # f = (a, b, cf) coupee en deux
+                       np.c_[b, mid, cg], np.c_[mid, a, cg]])     # g = (b, a, cg) coupee en deux
+    return vertices, faces, len(fwd)
+
+
+def make_manifold(vertices, faces, gap=0.002, min_fraction=0.001):
+    """Retire les fragments, puis separe les nappes qui se touchent (aucun point ne bouge de
+    plus de `gap`). Renvoie un maillage aux sommets fusionnes, comme relu depuis un STL."""
+    import numpy as np
+    import trimesh
+    m = trimesh.Trimesh(vertices, faces, process=True)
+    parts = m.split(only_watertight=False)
+    biggest = max(len(p.faces) for p in parts)
+    kept = [p for p in parts if len(p.faces) >= min_fraction * biggest]
+    m = trimesh.util.concatenate(kept)
+    v, f, moved = split_vertices(np.asarray(m.vertices), np.asarray(m.faces, dtype=np.int64), gap)
+    m = trimesh.Trimesh(v, f, process=True)                 # fusion comme a la relecture d'un STL
+    v, f, pinched = split_pinched_edges(np.asarray(m.vertices), np.asarray(m.faces, dtype=np.int64), gap)
+    return trimesh.Trimesh(v, f, process=True), dict(
+        fragments_removed=len(parts) - len(kept), vertices_split=moved, edges_split=pinched)
+
+
 def repair():
     import numpy as np
-    import torch
     import trimesh
-    import cumesh
 
     original = trimesh.load_mesh(RAW_STL, process=True)
     before = mesh_stats(original)
     record('cleaning', file='repair_report.json', before=before)
-    # Les seuils CuMesh sont en coordonnees normalisees TRELLIS (taille ~1), pas en mm.
-    gpu = cumesh.CuMesh()
-    gpu.init(torch.tensor(np.asarray(original.vertices) / SIZE, dtype=torch.float32, device='cuda').contiguous(),
-             torch.tensor(np.asarray(original.faces), dtype=torch.int32, device='cuda').contiguous())
-    for _ in range(2):
-        gpu.remove_duplicate_faces()
-        gpu.repair_non_manifold_edges()
-        gpu.remove_small_connected_components(1e-5)
-        gpu.fill_holes(max_hole_perimeter=3e-2)
-    gpu.unify_face_orientations()
-    v, f = gpu.read()
-    candidate = trimesh.Trimesh(v.cpu().numpy() * SIZE, f.cpu().numpy(), process=True)
-    del gpu, v, f
-    torch.cuda.empty_cache()
-    trimesh.repair.fix_normals(candidate, multibody=True)
+    # Le dual contouring laisse des aretes a 4 faces (nappes qui se touchent) ; les passes CuMesh
+    # en doublaient le nombre. Reparation CPU : retrait des fragments, puis separation des nappes
+    # de 2 microns. Teste sur un maillage TRELLIS 1024 : 19 786 aretes -> 0, etanche, 37 s.
+    candidate, repair_info = make_manifold(np.asarray(original.vertices),
+                                           np.asarray(original.faces, dtype=np.int64))
+    if candidate.volume < 0:
+        candidate.invert()
     candidate_path = OUT / f'{SLUG}-repair-candidate-{SIZE_TAG}.stl'
     candidate.export(candidate_path)
     # Valide le STL exact, apres fusion des sommets coincidents.
@@ -467,6 +579,7 @@ def repair():
     if topology_ok and shape_ok:
         delivered.export(REPAIRED_STL)
         candidate_path.unlink(missing_ok=True)
+    after['repair'] = repair_info
     record('TOPOLOGY_AND_SAMPLED_DRIFT_PASS' if topology_ok and shape_ok else 'NEEDS_REVIEW',
            file='repair_report.json', before=before, after=after, drift=drift,
            topology_ok=topology_ok, sampled_shape_check_ok=shape_ok, print_validated=False,
