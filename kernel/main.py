@@ -31,7 +31,8 @@ DEFAULTS = dict(
     image_model='stabilityai/stable-diffusion-xl-base-1.0',
     image_steps=30,
     guidance=7.0,
-    simplify_faces=3_000_000,
+    simplify_faces=None,         # plafond de triangles ; None = 3 M en 1024, 6 M en 1536
+    project_back=0.9,            # recolle les sommets remailles sur la surface TRELLIS (0 = non)
     resolution=1024,             # 1024 ou 1536 (cascade 1536 : memes modeles, details plus fins)
     stop_after=None,             # 'image' : s'arrete apres reference.png (test SDXL)
     style='objet',               # 'objet' ou 'miniature' (voir STYLES)
@@ -53,6 +54,8 @@ SIZE_TAG = f'{SIZE:g}mm'
 RESOLUTION = int(JOB['resolution'])
 if RESOLUTION not in (1024, 1536):
     raise ValueError(f'resolution {RESOLUTION} : 1024 ou 1536 seulement')
+# En 1536, TRELLIS produit ~15 M de triangles : un plafond de 3 M en jetait ~80 %.
+MAX_FACES = int(JOB['simplify_faces'] or (6_000_000 if RESOLUTION == 1536 else 3_000_000))
 REVISION = '75fbf0183001ed9876c8dbb35de6b68552ee08bd'
 ENCODER_BYTES = 1212559808
 CHUNK = 65536
@@ -387,21 +390,22 @@ def infer():
     gpu_mesh.init(torch.as_tensor(vertices, device='cuda', dtype=torch.float32).contiguous(),
                   torch.as_tensor(faces, device='cuda', dtype=torch.int32).contiguous())
     gpu_mesh.fill_holes(max_hole_perimeter=3e-2)
-    v, f = gpu_mesh.read()
+    source_v, source_f = gpu_mesh.read()
     del gpu_mesh
-    bvh = cumesh.cuBVH(v, f)
+    bvh = cumesh.cuBVH(source_v, source_f)
     v, f = cumesh.remeshing.remesh_narrow_band_dc(
-        v, f, center=torch.zeros(3, device='cuda'),
+        source_v, source_f, center=torch.zeros(3, device='cuda'),
         scale=(RESOLUTION + 3) / RESOLUTION, resolution=RESOLUTION,
         band=1, project_back=0, verbose=True, bvh=bvh)
-    del bvh
+    projection = project_to_source(v, source_v, source_f, bvh, float(JOB['project_back']))
+    del bvh, source_v, source_f
     gc.collect()
     torch.cuda.empty_cache()
     gpu_mesh = cumesh.CuMesh()
     gpu_mesh.init(v.contiguous(), f.contiguous())
     del v, f
     torch.cuda.empty_cache()
-    gpu_mesh.simplify(int(JOB['simplify_faces']), verbose=True)
+    gpu_mesh.simplify(MAX_FACES, verbose=True)
     v, f = gpu_mesh.read()
     mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy(), process=False)
     # TRELLIS.2 sort deja en Z vers le haut (verifie sur un rendu : pieds en bas). Plus grande
@@ -412,10 +416,31 @@ def infer():
     mesh.export(RAW_STL)
     mesh.export(OUT / f'{SLUG}.glb')
     record('mesh_ready', vertices=len(mesh.vertices), faces=len(mesh.faces), raw=raw_stats,
+           max_faces=MAX_FACES, projection=projection,
            watertight=bool(mesh.is_watertight), winding_consistent=bool(mesh.is_winding_consistent),
            bounds_mm=mesh.bounds.tolist(), elapsed_seconds=time.monotonic() - started,
            peak_cuda_allocated_gb=torch.cuda.max_memory_allocated() / 1024**3,
            stl=RAW_STL.name, print_ready=False)
+
+
+def project_to_source(vertices, source_v, source_f, bvh, ratio):
+    """Recolle les sommets remailles sur la surface TRELLIS d'origine (comme l'exporteur
+    Microsoft, remesh_project=0.9) : le dual contouring arrondit les aretes vives. Par blocs,
+    pour tenir sur le T4 ; modifie `vertices` sur place."""
+    import torch
+    if ratio <= 0:
+        return dict(ratio=0)
+    moved = torch.empty(len(vertices), dtype=torch.float32, device=vertices.device)
+    for start in range(0, len(vertices), CHUNK):
+        points = vertices[start:start + CHUNK]
+        _, face_id, uvw = bvh.unsigned_distance(points, return_uvw=True)
+        target = (source_v[source_f[face_id.long()]] * uvw.unsqueeze(-1)).sum(dim=1)
+        step = ratio * (target - points)
+        moved[start:start + CHUNK] = step.norm(dim=1)
+        points += step
+    # Deplacements en unites TRELLIS (taille ~1) : 1e-3 ~ 1 voxel en 1024.
+    return dict(ratio=ratio, mean=float(moved.mean()), p99=float(moved.quantile(0.99)) if len(moved) < 16_000_000
+                else float(moved[::8].quantile(0.99)), max=float(moved.max()))
 
 
 def sample_distances(bvh, coords, resolution, scale, center, offset):
