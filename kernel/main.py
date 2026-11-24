@@ -32,6 +32,7 @@ DEFAULTS = dict(
     image_steps=30,
     guidance=7.0,
     simplify_faces=3_000_000,
+    resolution=1024,             # 1024 ou 1536 (cascade 1536 : memes modeles, details plus fins)
     stop_after=None,             # 'image' : s'arrete apres reference.png (test SDXL)
     style='objet',               # 'objet' ou 'miniature' (voir STYLES)
     base_mm=None,                # diametre du socle rond ; None = valeur du style, 0 = sans socle
@@ -49,7 +50,9 @@ def slugify(text):
 SLUG = slugify(JOB['name'] or JOB['prompt'])
 SIZE = float(JOB['size_mm'])
 SIZE_TAG = f'{SIZE:g}mm'
-RESOLUTION = 1024
+RESOLUTION = int(JOB['resolution'])
+if RESOLUTION not in (1024, 1536):
+    raise ValueError(f'resolution {RESOLUTION} : 1024 ou 1536 seulement')
 REVISION = '75fbf0183001ed9876c8dbb35de6b68552ee08bd'
 ENCODER_BYTES = 1212559808
 CHUNK = 65536

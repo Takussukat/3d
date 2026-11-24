@@ -175,7 +175,7 @@ def run_batch(args, user, kernel_id):
         batch.append(job)
     if images and args.variantes > 1:
         sys.exit('--variantes ne sert qu\'avec des prompts texte')
-    common = dict(name=args.name, style=args.style, image_steps=args.steps,
+    common = dict(name=args.name, style=args.style, image_steps=args.steps, resolution=args.finesse,
                   size_mm=args.size or (32.0 if args.style == 'miniature' else 100.0))
     if args.socle is not None:
         common['base_mm'] = args.socle
@@ -228,6 +228,8 @@ def main():
         p.add_argument('--no-wait', action='store_true', help='ne pas attendre la fin')
         p.add_argument('--jusqua', choices=['image'], help="s'arreter apres une etape (test)")
         p.add_argument('--dry-run', action='store_true', help='preparer sans rien envoyer')
+        p.add_argument('--finesse', type=int, choices=[1024, 1536], default=1024,
+                       help='resolution de la forme (1536 : details plus fins, plus long)')
         if command == 'texte':
             p.add_argument('--variantes', type=int, default=1,
                            help='N > 1 : genere N images (graines seed..seed+N-1) et une planche, '
@@ -242,6 +244,7 @@ def main():
     p.add_argument('--socle', type=float, help='diametre du socle par defaut')
     p.add_argument('--variantes', type=int, default=1, help='N > 1 : planches seulement, sans 3D')
     p.add_argument('--steps', type=int, default=30)
+    p.add_argument('--finesse', type=int, choices=[1024, 1536], default=1024)
     p.add_argument('--no-wait', action='store_true')
     p.add_argument('--dry-run', action='store_true')
     sub.add_parser('statut')
@@ -262,7 +265,8 @@ def main():
         return run_batch(args, user, kernel_id)
     size = args.size or (32.0 if args.style == 'miniature' else 100.0)
     job = dict(mode='text' if args.command == 'texte' else 'image', name=args.name,
-               size_mm=size, seed=args.seed, image_steps=args.steps, style=args.style)
+               size_mm=size, seed=args.seed, image_steps=args.steps, style=args.style,
+               resolution=args.finesse)
     if args.socle is not None:
         job['base_mm'] = args.socle
     if getattr(args, 'variantes', 1) > 1:
