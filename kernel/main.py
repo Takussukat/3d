@@ -779,6 +779,13 @@ def repair():
     candidate.export(candidate_path)
     # Valide le STL exact, apres fusion des sommets coincidents.
     delivered = trimesh.load_mesh(candidate_path, process=True)
+    # La relecture supprime des triangles degeneres et peut ouvrir des trous microscopiques
+    # (nain 1536 avec projection : 4 trous de moins de 0,06 mm) : on les bouche et on revalide.
+    delivered, holes = close_small_holes(delivered)
+    if holes:
+        delivered.export(candidate_path)
+        delivered = trimesh.load_mesh(candidate_path, process=True)
+    repair_info['holes_closed'] = holes
     after = mesh_stats(delivered)
     np.random.seed(42)
     p0, _ = trimesh.sample.sample_surface(original, 3000)
@@ -800,6 +807,10 @@ def repair():
         candidate_path.unlink(missing_ok=True)
     after['repair'] = repair_info
     base = None
+    # Le socle (union manifold3d) prend ~11 Go a 6 M de triangles : on libere d'abord le reste.
+    del original, candidate
+    import gc
+    gc.collect()
     if BASE_MM > 0:
         base = (add_base(delivered, BASE_MM) if topology_ok and shape_ok
                 else dict(skipped='reparation non validee : pas de socle'))
@@ -808,6 +819,34 @@ def repair():
            topology_ok=topology_ok, sampled_shape_check_ok=shape_ok, print_validated=False,
            base=base,
            note="Pas de slicer, d'epaisseur, d'auto-intersection ni de test d'impression physique.")
+
+
+def close_small_holes(mesh, max_edges=30):
+    """Bouche les petits trous (boucles de bord de max_edges aretes au plus) par un eventail de
+    triangles oriente comme le reste du maillage. Renvoie (maillage, nombre de trous bouches)."""
+    import numpy as np
+    import trimesh
+    faces = np.asarray(mesh.faces)
+    half = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    key = np.sort(half, axis=1)
+    _, inverse, counts = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    border = half[counts[inverse.ravel()] == 1]          # demi-aretes de bord, sens des faces
+    following = {int(a): int(b) for a, b in border}
+    new_faces, closed, seen = [], 0, set()
+    for start in list(following):
+        if start in seen:
+            continue
+        loop, v = [], start
+        while v not in seen and v in following and len(loop) <= max_edges:
+            seen.add(v); loop.append(v); v = following[v]
+        if v != start or not 3 <= len(loop) <= max_edges:
+            continue
+        # aretes du trou parcourues a l'envers : triangles (v0, v[i+1], v[i])
+        new_faces += [[loop[0], loop[i + 1], loop[i]] for i in range(1, len(loop) - 1)]
+        closed += 1
+    if not new_faces:
+        return mesh, 0
+    return trimesh.Trimesh(mesh.vertices, np.vstack([faces, new_faces]), process=True), closed
 
 
 def add_base(figure, diameter, height=3.2, bevel=0.8, sink=0.6):
