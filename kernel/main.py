@@ -631,8 +631,9 @@ def split_pinched_edges(vertices, faces, gap):
     return vertices, faces, len(f)
 
 
-def make_manifold(vertices, faces, gap=0.002, min_fraction=0.001):
-    """Retire les fragments, puis separe les nappes qui se touchent (aucun point ne bouge de
+def make_manifold(vertices, faces, gap=0.002, min_fraction=0.01):
+    """Retire les morceaux detaches de moins de `min_fraction` des faces du plus gros (eclats
+    flottants inimprimables ; 0,1 % laissait passer un eclat de 3 000 faces a 1536), puis separe les nappes qui se touchent (aucun point ne bouge de
     plus de `gap`). Renvoie un maillage aux sommets fusionnes, comme relu depuis un STL."""
     import numpy as np
     import trimesh
