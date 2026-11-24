@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publie un lot de figurines terminees comme dataset Kaggle prive (un dataset par jour).
 
-Pour chaque figurine du lot (resultats/<lot>/<lot>/<slug>/) : rendus produit (4 vues),
+Pour chaque figurine du lot (resultats/<lot>/<slug>/) : rendus produit (4 vues),
 fiche.md, STL avec et sans socle, image de reference, planche des variantes. Les fichiers sont
 a plat, prefixes par le slug, dans un dataset `<user>/figurines-AAAA-MM-JJ`.
 
@@ -138,7 +138,7 @@ def main():
         for image in render(main_stl, renders):
             shutil.move(image, out / f'{slug}__{image.name}')
         renders.rmdir()
-        text = folder.parent.parent / f'{slug}.description.txt'
+        text = folder.parent / f'{slug}.description.txt'
         description = text.read_text(encoding='utf-8').strip() if text.is_file() else None
         (out / f'{slug}__fiche.md').write_text(fiche(slug, summary, main_stl, with_base, description),
                                                encoding='utf-8')

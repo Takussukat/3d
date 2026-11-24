@@ -43,7 +43,7 @@ corriger dans l'environnement « 3d ».
 python stl_factory.py lot build/jour/planches.json --name planches-DATE --variantes 4
 ```
 
-Résultat : `resultats/planches-DATE/planches-DATE/<slug>/planche.png` et `variantes/graine-*.png`.
+Résultat : `resultats/planches-DATE/<slug>/planche.png` et `variantes/graine-*.png`.
 
 ## 3. Choisir la meilleure variante de chaque figurine
 
@@ -51,13 +51,14 @@ Regarder chaque `planche.png`. Critères, dans l'ordre :
 1. une seule figurine, entière (pieds et tête visibles), de face ou de trois-quarts ;
 2. silhouette lisible, membres et armes épais, peu d'éléments fins détachés ;
 3. anatomie correcte (mains, nombre de membres), arme cohérente ;
-4. fond uni sans décor ni socle généré.
+4. fond uni sans décor ; à qualité égale, préférer une variante sans socle généré
+   (SDXL en dessine souvent un malgré le négatif ; il se retrouve alors sur notre socle rond).
 
 Si aucune variante n'est correcte, écarter la figurine du jour (3 au lieu de 4, le noter).
 Écrire `build/jour/3d.json` avec le chemin absolu de l'image choisie et les mêmes `size`/`socle` :
 
 ```json
-[{"name": "Gobelin archer", "image": "/home/user/3d/resultats/planches-DATE/planches-DATE/gobelin-archer/variantes/graine-44.png"}]
+[{"name": "Gobelin archer", "image": "/home/user/3d/resultats/planches-DATE/gobelin-archer/variantes/graine-44.png", "seed": 44}]
 ```
 
 ## 4. 3D, réparation, socle (~1 h)
