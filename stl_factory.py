@@ -60,7 +60,7 @@ def build_kernel(job, user, args):
     (build / 'main.py').write_text(source, encoding='utf-8')
     datasets = [f'{user}/{args.wheels_dataset}', f'{user}/{args.encoder_dataset}']
     if job.get('stop_after') == 'image':
-        datasets = []                      # test SDXL : aucun dataset requis
+        datasets = []                      # images seules : aucun dataset requis
     if job['mode'] == 'image':
         datasets.append(f'{user}/{args.input_dataset}')
     metadata = dict(
@@ -126,6 +126,16 @@ def fetch(kernel_id, slug, out):
             if data.get('error'):
                 print('Erreur :', data['error'])
             break
+    sheet = next(folder.rglob('planche.png'), None)
+    if sheet:
+        summary = json.loads(next(folder.rglob('summary.json')).read_text())
+        job = summary.get('job', {})
+        print(f'\nPlanche des variantes : {sheet}')
+        print('Choisissez une graine, puis lancez la 3D sur cette image exacte :')
+        for variant in sorted(sheet.parent.glob('variantes/graine-*.png')):
+            print(f'  python stl_factory.py image "{variant}" --name {slug}'
+                  f" --style {job.get('style', 'objet')} --size {job.get('size_mm', 100):g}")
+        return
     print('\nFichiers STL :' if stls else '\nAucun STL produit ; voir les fichiers error_*.txt')
     for stl in stls:
         print(f'  {stl}  ({stl.stat().st_size / 1e6:.1f} Mo)')
@@ -153,12 +163,22 @@ def main():
         p = sub.add_parser(command)
         p.add_argument('source', help=help_text)
         p.add_argument('--name', help='nom des fichiers de sortie')
-        p.add_argument('--size', type=float, default=100.0, help='plus grande dimension en mm')
+        p.add_argument('--size', type=float,
+                       help='plus grande dimension en mm, socle non compris '
+                            '(defaut : 32 en miniature, 100 sinon)')
+        p.add_argument('--style', choices=['objet', 'miniature'], default='objet',
+                       help='miniature : prompt figurine de jeu + socle rond')
+        p.add_argument('--socle', type=float,
+                       help='diametre du socle en mm, 0 = sans (defaut : 25 en miniature)')
         p.add_argument('--seed', type=int, default=42)
         p.add_argument('--steps', type=int, default=30, help="etapes SDXL (mode texte)")
         p.add_argument('--no-wait', action='store_true', help='ne pas attendre la fin')
         p.add_argument('--jusqua', choices=['image'], help="s'arreter apres une etape (test)")
         p.add_argument('--dry-run', action='store_true', help='preparer sans rien envoyer')
+        if command == 'texte':
+            p.add_argument('--variantes', type=int, default=1,
+                           help='N > 1 : genere N images (graines seed..seed+N-1) et une planche, '
+                                'sans 3D, pour choisir la meilleure')
     sub.add_parser('statut')
     p = sub.add_parser('recuperer')
     p.add_argument('--name', required=True)
@@ -173,8 +193,14 @@ def main():
         fetch(kernel_id, slug_of(args), args.out)
         return
 
+    size = args.size or (32.0 if args.style == 'miniature' else 100.0)
     job = dict(mode='text' if args.command == 'texte' else 'image', name=args.name,
-               size_mm=args.size, seed=args.seed, image_steps=args.steps)
+               size_mm=size, seed=args.seed, image_steps=args.steps, style=args.style)
+    if args.socle is not None:
+        job['base_mm'] = args.socle
+    if getattr(args, 'variantes', 1) > 1:
+        job['variants'] = args.variantes
+        job['stop_after'] = 'image'        # la 3D se lance ensuite sur l'image choisie
     if args.jusqua:
         if args.command != 'texte':
             sys.exit('--jusqua image ne sert qu\'en mode texte')

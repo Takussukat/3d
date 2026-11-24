@@ -33,6 +33,9 @@ DEFAULTS = dict(
     guidance=7.0,
     simplify_faces=3_000_000,
     stop_after=None,             # 'image' : s'arrete apres reference.png (test SDXL)
+    style='objet',               # 'objet' ou 'miniature' (voir STYLES)
+    base_mm=None,                # diametre du socle rond ; None = valeur du style, 0 = sans socle
+    variants=1,                  # > 1 : N images (graines seed, seed+1...) + planche, sans 3D
 )
 JOB = {**DEFAULTS, **JOB, **json.loads(os.environ.get('STL_JOB', '{}'))}
 
@@ -63,13 +66,35 @@ os.environ.update(ATTN_BACKEND='xformers', SPARSE_ATTN_BACKEND='xformers',
                   CUDA_VISIBLE_DEVICES='0', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
                   HF_HOME=str(ROOT / 'hf'), PYTHONUNBUFFERED='1', OPENBLAS_NUM_THREADS='1')
 
-# Suffixe et negatif pour obtenir un objet unique, centre, sur fond neutre :
-# c'est ce que TRELLIS.2 reconstruit le mieux.
-PROMPT_SUFFIX = (', single object, centered, full view, entire object visible, '
-                 'isolated on plain white background, soft studio lighting, '
-                 'detailed 3D sculpture, matte material')
-NEGATIVE = ('multiple objects, cropped, cut off, out of frame, text, watermark, logo, '
-            'busy background, scenery, floor, harsh shadows, blurry, low quality, people')
+# Suffixe et negatif ajoutes au prompt. Objectif : un objet unique, centre, entier, sur fond
+# neutre (ce que TRELLIS.2 reconstruit le mieux). SDXL ne lit que 77 tokens (75 utiles) : le
+# sujet vient en premier, et les suffixes sont courts (miniature : 31 tokens, il reste ~44 pour
+# le sujet). Un depassement est signale dans status.json (prompt_tokens).
+STYLES = dict(
+    objet=dict(
+        base_mm=0,
+        suffix=(', single object, centered, full view, entire object visible, '
+                'isolated on plain white background, soft studio lighting, '
+                'detailed 3D sculpture, matte material'),
+        negative=('multiple objects, cropped, cut off, out of frame, text, watermark, logo, '
+                  'busy background, scenery, floor, harsh shadows, blurry, low quality, people')),
+    # Figurine de jeu : sculpture grise (la forme se lit sans couleurs parasites), proportions
+    # heroiques, details epais ; le negatif ecarte ce qui casse a l'impression (meches, fumee,
+    # chaines) et le socle (on ajoute le notre).
+    miniature=dict(
+        base_mm=25,
+        suffix=(', 32mm tabletop miniature, grey resin sculpt, bold silhouette, chunky details, '
+                'full body, front view, centered, plain grey background, studio lighting'),
+        negative=('base, pedestal, scenery, multiple figures, cropped, cut off feet, '
+                  'thin loose hair strands, wispy fur, floating particles, smoke, fire, chains, '
+                  'transparent, glowing, painted colors, photo, text, watermark, blurry, lowres, '
+                  'deformed hands, extra limbs, harsh shadows')),
+)
+if JOB['style'] not in STYLES:
+    raise ValueError(f"style inconnu : {JOB['style']} (choix : {', '.join(STYLES)})")
+STYLE = STYLES[JOB['style']]
+BASE_MM = float(STYLE['base_mm'] if JOB['base_mm'] is None else JOB['base_mm'])
+BASE_STL = OUT / f'{SLUG}-socle{BASE_MM:g}-{SIZE_TAG}.stl'
 
 
 # --------------------------------------------------------------------------- utilitaires
@@ -104,7 +129,7 @@ def bootstrap():
         raise ValueError(f"mode inconnu : {JOB['mode']}")
     if JOB['mode'] == 'text' and not JOB['prompt']:
         raise ValueError('Mode texte sans prompt')
-    image_only = JOB['stop_after'] == 'image'
+    image_only = JOB['stop_after'] == 'image' or int(JOB['variants']) > 1
     if image_only and JOB['mode'] != 'text':
         raise ValueError("stop_after='image' n'a de sens qu'en mode texte")
     if not image_only:
@@ -126,7 +151,7 @@ def bootstrap():
          'diffusers>=0.30,<0.36', 'pillow', 'opencv-python-headless', 'easydict', 'tqdm',
          'scipy', 'trimesh', 'safetensors', 'huggingface_hub<1', 'einops', 'timm', 'plyfile',
          'zstandard', 'imageio', 'imageio-ffmpeg', 'matplotlib', 'kornia', 'rtree',
-         'pymeshfix==0.17.1',
+         'pymeshfix==0.17.1', 'manifold3d',
          'git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8'])
     me = pathlib.Path(__file__).resolve()
     if image_only:
@@ -135,6 +160,7 @@ def bootstrap():
         run([python, '-u', me], env=dict(os.environ, STL_JOB=json.dumps(JOB), STL_STAGE='image'),
             timeout=1800)
         record('finished', file='summary.json', stopped_after='image',
+               variants=int(JOB['variants']),
                files=sorted(p.name for p in OUT.iterdir() if p.is_file()),
                total_seconds=round(time.monotonic() - started))
         return
@@ -184,15 +210,51 @@ def make_image():
         pipe = StableDiffusionXLPipeline.from_pretrained(JOB['image_model'], **kwargs)
     pipe.to('cuda')
     pipe.enable_vae_slicing()
-    prompt = JOB['prompt'].strip().rstrip('.') + PROMPT_SUFFIX
-    generator = torch.Generator('cuda').manual_seed(int(JOB['seed']))
-    image = pipe(prompt=prompt, negative_prompt=NEGATIVE,
-                 num_inference_steps=int(JOB['image_steps']), guidance_scale=float(JOB['guidance']),
-                 width=1024, height=1024, generator=generator).images[0]
-    if np.asarray(image).max() < 10:
-        raise RuntimeError("SDXL a produit une image noire (probablement des NaN)")
-    image.save(REFERENCE)
-    record('image_ready', full_prompt=prompt, image='reference.png')
+    prompt = JOB['prompt'].strip().rstrip('.') + STYLE['suffix']
+    tokens = len(pipe.tokenizer(prompt)['input_ids']) - 2
+    if tokens > 75:
+        print(f'ATTENTION : prompt de {tokens} tokens, SDXL ignore tout apres le 75e', flush=True)
+    seeds = [int(JOB['seed']) + i for i in range(max(1, int(JOB['variants'])))]
+    images = []
+    for seed in seeds:
+        generator = torch.Generator('cuda').manual_seed(seed)
+        image = pipe(prompt=prompt, negative_prompt=STYLE['negative'],
+                     num_inference_steps=int(JOB['image_steps']),
+                     guidance_scale=float(JOB['guidance']),
+                     width=1024, height=1024, generator=generator).images[0]
+        if np.asarray(image).max() < 10:
+            raise RuntimeError(f"SDXL a produit une image noire (graine {seed}, probablement des NaN)")
+        images.append(image)
+        record('image_ready', full_prompt=prompt, prompt_tokens=tokens, seed=seed,
+               done=len(images), total=len(seeds))
+    if len(images) == 1:
+        images[0].save(REFERENCE)
+        return
+    folder = OUT / 'variantes'
+    folder.mkdir(exist_ok=True)
+    for seed, image in zip(seeds, images):
+        image.save(folder / f'graine-{seed}.png')
+    contact_sheet(images, seeds).save(OUT / 'planche.png')
+    record('variants_ready', full_prompt=prompt, prompt_tokens=tokens, seeds=seeds,
+           sheet='planche.png', folder='variantes')
+
+
+def contact_sheet(images, seeds, thumb=512):
+    """Planche d'apercu : vignettes numerotees par graine, 3 par ligne."""
+    from PIL import Image, ImageDraw, ImageFont
+    columns = min(3, len(images))
+    rows = -(-len(images) // columns)
+    sheet = Image.new('RGB', (columns * thumb, rows * (thumb + 48)), 'white')
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.load_default(size=36)
+    except TypeError:
+        font = ImageFont.load_default()
+    for i, (image, seed) in enumerate(zip(images, seeds)):
+        x, y = (i % columns) * thumb, (i // columns) * (thumb + 48)
+        sheet.paste(image.convert('RGB').resize((thumb, thumb)), (x, y + 48))
+        draw.text((x + 12, y + 6), f'graine {seed}', fill='black', font=font)
+    return sheet
 
 
 # --------------------------------------------------------------------------- etape TRELLIS.2
@@ -593,10 +655,45 @@ def repair():
         delivered.export(REPAIRED_STL)
         candidate_path.unlink(missing_ok=True)
     after['repair'] = repair_info
+    base = None
+    if BASE_MM > 0:
+        base = (add_base(delivered, BASE_MM) if topology_ok and shape_ok
+                else dict(skipped='reparation non validee : pas de socle'))
     record('TOPOLOGY_AND_SAMPLED_DRIFT_PASS' if topology_ok and shape_ok else 'NEEDS_REVIEW',
            file='repair_report.json', before=before, after=after, drift=drift,
            topology_ok=topology_ok, sampled_shape_check_ok=shape_ok, print_validated=False,
+           base=base,
            note="Pas de slicer, d'epaisseur, d'auto-intersection ni de test d'impression physique.")
+
+
+def add_base(figure, diameter, height=3.2, bevel=0.8, sink=0.6):
+    """Socle rond biseaute, fusionne sous les pieds (union booleenne manifold3d).
+
+    La figurine est centree sur ses pieds (sommets des 2 mm du bas) et enfoncee de `sink` mm
+    dans le socle pour une fusion franche. Ecrit BASE_STL seulement si le resultat est un
+    volume unique, etanche et manifold.
+    """
+    import numpy as np
+    import trimesh
+    radius = diameter / 2
+    disc = trimesh.creation.revolve(
+        [[0, 0], [radius, 0], [radius, height - bevel], [radius - bevel, height], [0, height]],
+        sections=128)
+    figure = figure.copy()
+    bottom = figure.bounds[0][2]
+    feet = figure.vertices[figure.vertices[:, 2] < bottom + 2.0]
+    cx, cy = (feet[:, :2].min(0) + feet[:, :2].max(0)) / 2
+    figure.apply_translation([-cx, -cy, height - sink - bottom])
+    feet_radius = float(np.linalg.norm(feet[:, :2] - [cx, cy], axis=1).max())
+    merged = trimesh.boolean.union([figure, disc], engine='manifold')
+    stats = mesh_stats(merged)
+    ok = bool(merged.is_volume and stats['nonmanifold_edges'] == 0
+              and len(merged.split(only_watertight=False)) == 1)
+    if ok:
+        merged.export(BASE_STL)
+    return dict(diameter_mm=diameter, height_mm=height, feet_radius_mm=round(feet_radius, 2),
+                feet_overhang=feet_radius > radius - bevel, ok=ok, stl=BASE_STL.name if ok else None,
+                total_height_mm=round(float(merged.extents[2]), 2), faces=stats['faces'])
 
 
 # --------------------------------------------------------------------------- point d'entree

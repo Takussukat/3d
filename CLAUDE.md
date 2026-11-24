@@ -15,7 +15,9 @@ Répondre en français.
   - Sortie TRELLIS.2 déjà en Z vers le haut : pas de rotation, objet posé sur Z = 0.
 - `kernel/build_wheels.py` : kernel Kaggle qui compile les 4 wheels (CUDA 12.4 installé par le kernel, car l'image
   Kaggle a nvcc 13) pour le dataset `trellis2-compiled-wheels`.
-- `stl_factory.py` : lanceur local (CLI `kaggle`). `--jusqua image` teste SDXL seul, sans dataset. Il intègre le travail dans la ligne `JOB = {}  # @@JOB@@`,
+- `stl_factory.py` : lanceur local (CLI `kaggle`). `--jusqua image` teste SDXL seul, sans dataset.
+  `--style miniature` (prompt figurine + socle `add_base`, union manifold3d), `--variantes N` (planche d'images, sans 3D).
+  Les suffixes de `STYLES` doivent rester courts : SDXL tronque à 75 tokens (miniature = 31 tokens). Il intègre le travail dans la ligne `JOB = {}  # @@JOB@@`,
   pousse le kernel, attend la fin et télécharge les sorties dans `resultats/`.
 
 ## Contraintes

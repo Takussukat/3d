@@ -38,6 +38,22 @@ python stl_factory.py recuperer --name dragon
 
 Options : `--seed` (autre variante), `--steps` (étapes SDXL), `--dry-run` (prépare sans rien envoyer).
 
+### Figurines de jeu (`--style miniature`)
+
+```bash
+# 1. Six images (graines 42 à 47) et une planche d'aperçu, sans 3D (~5 min de GPU)
+python stl_factory.py texte "a goblin archer with a short bow and a quiver" --name gobelin --style miniature --variantes 6
+# 2. La 3D sur l'image choisie (le lanceur affiche la commande exacte pour chaque graine)
+python stl_factory.py image resultats/gobelin/gobelin/variantes/graine-44.png --name gobelin --style miniature --size 32
+```
+
+- Le prompt est complété par un style « figurine 32 mm, sculpture en résine grise, silhouette lisible,
+  détails épais », et le négatif écarte ce qui casse à l'impression (mèches fines, fumée, chaînes).
+  Décrivez seulement le personnage, en anglais, en 40 mots environ : SDXL ignore tout après 75 tokens.
+- `--size` = hauteur de la figurine sans socle (32 mm par défaut ; ~55–60 mm pour une grande créature).
+- Socle rond biseauté de 3,2 mm, fusionné sous les pieds : 25 mm par défaut, `--socle 32`, `--socle 0` pour aucun.
+  Il produit `<nom>-socle25-32mm.stl` en plus du STL réparé sans socle.
+
 ## Résultats (`resultats/<nom>/`)
 
 - `reference.png`, `conditioning.png` : l'image générée, puis l'image détourée vue par TRELLIS.
