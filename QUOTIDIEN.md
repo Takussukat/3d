@@ -1,7 +1,7 @@
 # Production quotidienne : 4 figurines fantasy JDR
 
 Procédure suivie chaque jour par la session automatique (tâche planifiée). Tout se passe dans le
-dépôt, sur la branche de travail. Durée : ~1 h 30, dont ~1 h 10 de GPU Kaggle.
+dépôt, sur la branche de travail. Durée : ~2 h, dont ~1 h 45 de GPU Kaggle (environ 12 h sur le quota de 30 h par semaine).
 `DATE` = date du jour (AAAA-MM-JJ). Les commandes longues se lancent en arrière-plan et se
 suivent avec `python stl_factory.py statut` (ou les journaux : `kaggle kernels logs -f <user>/stl-factory`).
 
@@ -61,11 +61,14 @@ Si aucune variante n'est correcte, écarter la figurine du jour (3 au lieu de 4,
 [{"name": "Gobelin archer", "image": "/home/user/3d/resultats/planches-DATE/gobelin-archer/variantes/graine-44.png", "seed": 44}]
 ```
 
-## 4. 3D, réparation, socle (~1 h)
+## 4. 3D, réparation, socle (~1 h 30)
 
 ```bash
-python stl_factory.py lot build/jour/3d.json --name lot-DATE
+python stl_factory.py lot build/jour/3d.json --name lot-DATE --finesse 1536
 ```
+
+Finesse 1536 : barbes, gravures et textures nettement plus fines qu'en 1024 (comparaison du
+2026-11-24), ~17 min par figurine, 7,9 Go de GPU.
 
 Vérifier pour chaque figurine `repair_report.json` : statut `TOPOLOGY_AND_SAMPLED_DRIFT_PASS` et
 `base.ok = true`. Une figurine en échec n'est pas publiée (la signaler dans le compte rendu).
