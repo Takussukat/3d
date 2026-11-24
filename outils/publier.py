@@ -133,6 +133,11 @@ def main():
             sheet = next(args.planches.rglob(f'{slug}/planche.png'), None)
             if sheet:
                 shutil.copy(sheet, out / f'{slug}__planche-variantes.png')
+        if args.planches and not summary.get('job', {}).get('prompt'):
+            # 3D lancee depuis l'image choisie : le prompt est dans le lot de variantes.
+            origin = next(args.planches.rglob(f'{slug}/summary.json'), None)
+            if origin:
+                summary.setdefault('job', {})['prompt'] = json.loads(origin.read_text())['job'].get('prompt')
         renders = out / f'_{slug}'
         renders.mkdir()
         for image in render(main_stl, renders):
