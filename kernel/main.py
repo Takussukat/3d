@@ -154,13 +154,14 @@ def record(status, file='status.json', **kwargs):
 
 
 def encoder_folder():
+    """Dossier de l'encodeur DINOv3, reconnu a la taille exacte de ses poids (les modeles hors
+    ligne, comme BiRefNet, ont aussi un model.safetensors a cote d'un config.json)."""
     candidates = [p.parent for p in pathlib.Path('/kaggle/input').rglob('model.safetensors')
-                  if (p.parent / 'config.json').is_file()]
+                  if (p.parent / 'config.json').is_file() and p.stat().st_size == ENCODER_BYTES]
     if len(candidates) != 1:
-        raise RuntimeError(f'Attendu un seul encodeur officiel en entree, trouve {len(candidates)}')
+        raise RuntimeError(f'Attendu un seul encodeur DINOv3 de {ENCODER_BYTES} octets en entree, '
+                           f'trouve {len(candidates)}')
     folder = candidates[0]
-    if (folder / 'model.safetensors').stat().st_size != ENCODER_BYTES:
-        raise RuntimeError("La taille des poids de l'encodeur ne correspond pas au dataset verifie")
     return folder
 
 
