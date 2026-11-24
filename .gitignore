@@ -1,3 +1,4 @@
 build/
 resultats/
 __pycache__/
+outils/rendu/node_modules/

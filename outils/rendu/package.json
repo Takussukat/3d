@@ -1,0 +1,9 @@
+{
+  "name": "stl-factory-rendu",
+  "private": true,
+  "description": "Rendus produit des STL (three.js dans Chromium via Playwright)",
+  "type": "module",
+  "dependencies": {
+    "three": "0.160.0"
+  }
+}

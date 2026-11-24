@@ -59,9 +59,10 @@ def build_kernel(job, user, args):
     build.mkdir(parents=True)
     (build / 'main.py').write_text(source, encoding='utf-8')
     datasets = [f'{user}/{args.wheels_dataset}', f'{user}/{args.encoder_dataset}']
-    if job.get('stop_after') == 'image':
+    items = [{**job, **item} for item in job.get('batch') or [{}]]
+    if all(item.get('stop_after') == 'image' for item in items):
         datasets = []                      # images seules : aucun dataset requis
-    if job['mode'] == 'image':
+    if any(item['mode'] == 'image' for item in items):
         datasets.append(f'{user}/{args.input_dataset}')
     metadata = dict(
         id=f'{user}/{args.kernel}', title=args.kernel.replace('-', ' ').title(),
@@ -72,20 +73,22 @@ def build_kernel(job, user, args):
     return build
 
 
-def upload_image(image, user, args):
-    """Publie l'image comme version d'un dataset prive contenant reference.png."""
+def upload_image(image, user, args, files=None):
+    """Publie l'image (reference.png) ou les images d'un lot ({nom de fichier: chemin})
+    comme nouvelle version d'un dataset prive."""
     folder = HERE / 'build' / args.input_dataset
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True)
-    target = folder / 'reference.png'
-    if image.suffix.lower() == '.png':
-        shutil.copy(image, target)
-    else:
+    for name, source in (files or {'reference.png': image}).items():
+        target = folder / name
+        if source.suffix.lower() == '.png':
+            shutil.copy(source, target)
+            continue
         try:
             from PIL import Image
         except ImportError:
             sys.exit('Image non PNG : installez Pillow (pip install pillow) ou convertissez-la en PNG')
-        Image.open(image).convert('RGBA').save(target)
+        Image.open(source).convert('RGBA').save(target)
     dataset_id = f'{user}/{args.input_dataset}'
     (folder / 'dataset-metadata.json').write_text(json.dumps(dict(
         title=args.input_dataset.replace('-', ' ').title(), id=dataset_id,
@@ -96,7 +99,7 @@ def upload_image(image, user, args):
     if kaggle('datasets', 'status', dataset_id, check=False) is None:
         kaggle('datasets', 'create', '-p', folder)          # prive par defaut
     else:
-        kaggle('datasets', 'version', '-p', folder, '-m', f'image {image.name}')
+        kaggle('datasets', 'version', '-p', folder, '-m', f'{len(files or [image])} image(s)')
     for _ in range(60):                                      # attend le traitement Kaggle
         status = (kaggle('datasets', 'status', dataset_id, check=False) or '').lower()
         if 'ready' in status:
@@ -117,11 +120,21 @@ def fetch(kernel_id, slug, out):
     folder = out / slug
     folder.mkdir(parents=True, exist_ok=True)
     kaggle('kernels', 'output', kernel_id, '-p', folder)
+    batch = folder / 'batch_summary.json'
+    if batch.is_file():                    # lot : un sous-dossier par figurine
+        for item in json.loads(batch.read_text()):
+            print(f"\n=== {item['name']} : {'ok' if item['ok'] else 'ECHEC'} ({item['seconds']} s)")
+            report(folder / item['slug'], item['slug'])
+        return
+    report(folder, slug)
+
+
+def report(folder, slug):
     stls = sorted(folder.rglob('*.stl'))
     for name in ('summary.json', 'repair_report.json', 'status.json'):
-        report = next(folder.rglob(name), None)
-        if report:
-            data = json.loads(report.read_text())
+        path = next(folder.rglob(name), None)
+        if path:
+            data = json.loads(path.read_text())
             print(f"\n{name} : statut = {data.get('status')}")
             if data.get('error'):
                 print('Erreur :', data['error'])
@@ -139,6 +152,46 @@ def fetch(kernel_id, slug, out):
     print('\nFichiers STL :' if stls else '\nAucun STL produit ; voir les fichiers error_*.txt')
     for stl in stls:
         print(f'  {stl}  ({stl.stat().st_size / 1e6:.1f} Mo)')
+
+
+def run_batch(args, user, kernel_id):
+    """Lot : une seule installation Kaggle, puis chaque figurine dans son propre processus."""
+    items = json.loads(args.fichier.read_text(encoding='utf-8'))
+    batch, images = [], {}
+    for item in items:
+        slug = slug_of(argparse.Namespace(name=item['name'], source=None))
+        job = dict(name=item['name'], seed=item.get('seed', 42))
+        for key, field in (('size', 'size_mm'), ('socle', 'base_mm')):
+            if key in item:
+                job[field] = item[key]
+        if 'image' in item:
+            image = (args.fichier.parent / item['image']).expanduser()
+            if not image.is_file():
+                sys.exit(f'Image introuvable : {image}')
+            job.update(mode='image', input_image=f'{slug}.png')
+            images[f'{slug}.png'] = image
+        else:
+            job.update(mode='text', prompt=item['prompt'])
+        batch.append(job)
+    if images and args.variantes > 1:
+        sys.exit('--variantes ne sert qu\'avec des prompts texte')
+    common = dict(name=args.name, style=args.style, image_steps=args.steps,
+                  size_mm=args.size or (32.0 if args.style == 'miniature' else 100.0))
+    if args.socle is not None:
+        common['base_mm'] = args.socle
+    if args.variantes > 1:
+        common.update(variants=args.variantes, stop_after='image')
+    job = dict(common, mode='image' if images else 'text', batch=batch)
+    if images:
+        upload_image(None, user, args, files=images)
+    build = build_kernel(job, user, args)
+    slug = slug_of(argparse.Namespace(name=args.name, source=None))
+    print(f'Lot pret : {len(batch)} travaux, kernel {build}  (sortie : {slug})')
+    kaggle('kernels', 'push', '-p', build, dry=args.dry_run)
+    if args.dry_run or args.no_wait:
+        print(f'Ensuite : python stl_factory.py recuperer --name "{args.name}"')
+        return
+    wait_and_fetch(kernel_id, slug, args.out)
 
 
 def slug_of(args):
@@ -179,6 +232,18 @@ def main():
             p.add_argument('--variantes', type=int, default=1,
                            help='N > 1 : genere N images (graines seed..seed+N-1) et une planche, '
                                 'sans 3D, pour choisir la meilleure')
+    p = sub.add_parser('lot', help='plusieurs figurines en une session Kaggle (fichier JSON)')
+    p.add_argument('fichier', type=pathlib.Path,
+                   help='liste JSON de {"name", "prompt"} ou {"name", "image"}, '
+                        'avec en option "seed", "size", "socle" par figurine')
+    p.add_argument('--name', required=True, help='nom du lot (dossier de resultats)')
+    p.add_argument('--style', choices=['objet', 'miniature'], default='miniature')
+    p.add_argument('--size', type=float, help='hauteur par defaut (32 en miniature)')
+    p.add_argument('--socle', type=float, help='diametre du socle par defaut')
+    p.add_argument('--variantes', type=int, default=1, help='N > 1 : planches seulement, sans 3D')
+    p.add_argument('--steps', type=int, default=30)
+    p.add_argument('--no-wait', action='store_true')
+    p.add_argument('--dry-run', action='store_true')
     sub.add_parser('statut')
     p = sub.add_parser('recuperer')
     p.add_argument('--name', required=True)
@@ -193,6 +258,8 @@ def main():
         fetch(kernel_id, slug_of(args), args.out)
         return
 
+    if args.command == 'lot':
+        return run_batch(args, user, kernel_id)
     size = args.size or (32.0 if args.style == 'miniature' else 100.0)
     job = dict(mode='text' if args.command == 'texte' else 'image', name=args.name,
                size_mm=size, seed=args.seed, image_steps=args.steps, style=args.style)
@@ -222,6 +289,10 @@ def main():
         print(f'Ensuite : python stl_factory.py recuperer --name "{job["name"] or slug}"')
         return
 
+    wait_and_fetch(kernel_id, slug, args.out)
+
+
+def wait_and_fetch(kernel_id, slug, out):
     started = time.monotonic()
     time.sleep(30)
     while True:
@@ -230,7 +301,7 @@ def main():
         if state in ('complete', 'error', 'cancel'):
             break
         time.sleep(60)
-    fetch(kernel_id, slug, args.out)
+    fetch(kernel_id, slug, out)
 
 
 if __name__ == '__main__':

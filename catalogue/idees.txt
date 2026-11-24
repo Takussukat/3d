@@ -1,0 +1,57 @@
+# Idees de figurines fantasy JDR. Une par ligne : categorie | concept.
+# La session quotidienne en choisit 4 absentes de historique.csv, de categories differentes,
+# et redige un prompt anglais court (~30 mots). Taille : 32 mm (humanoide), 45-60 mm (grande creature).
+# Pas de personnage ni de creature protege par un editeur (noms, designs reconnaissables).
+heros | dwarf warrior with a round shield and a war axe
+heros | elven ranger drawing a longbow
+heros | human paladin in plate armor raising a warhammer
+heros | halfling rogue crouching with two daggers
+heros | horned demon-blooded warlock casting a spell from a tome
+heros | dragon-headed humanoid fighter with a greatsword
+heros | gnome tinkerer with a mechanical arm and goggles
+heros | half-orc barbarian with a great axe, fur cloak
+heros | human cleric holding a holy symbol and a mace
+heros | elven wizard with a tall staff and a long robe
+heros | monk in a fighting stance, bare feet, prayer beads
+heros | bard playing a lute, feathered hat
+heros | druid with antler headdress and a gnarled staff
+heros | female knight with a lance and kite shield
+pnj | old innkeeper holding a tankard, apron
+pnj | hooded merchant with a large backpack of wares
+pnj | town guard with a spear and a lantern
+pnj | blacksmith with a hammer and leather apron
+pnj | plague doctor with a beaked mask and a cane
+pnj | witch hunter with a wide-brimmed hat and a crossbow
+monstre | goblin archer with a short bow and a quiver
+monstre | kobold trapmaker with a spear
+monstre | skeleton warrior with a rusty sword and a broken shield
+monstre | zombie peasant with a pitchfork
+monstre | orc berserker with two axes
+monstre | hobgoblin captain in banded armor
+monstre | hyena-headed gnoll hunter with a flail
+monstre | lizardfolk warrior with a stone spear
+monstre | cultist in a hooded robe holding a ritual dagger
+monstre | ghoul crouching with long claws
+monstre | bandit leader with a cutlass and an eyepatch
+monstre | dark elf assassin with a hand crossbow
+monstre | mushroom folk warrior with a mace
+monstre | animated suit of armor with a halberd
+grande-creature | ogre with a tree-trunk club
+grande-creature | swamp troll, hunched, holding a wooden club
+grande-creature | minotaur with a double-headed axe
+grande-creature | owl-headed bear rearing up on hind legs
+grande-creature | stone golem with massive fists
+grande-creature | hill giant lifting a boulder
+grande-creature | wraith knight, tattered cloak, greatsword
+grande-creature | ancient walking tree with a bark face
+grande-creature | bugbear chieftain with a morningstar
+grande-creature | earth elemental made of rocks and crystals
+bete | dire wolf, snarling
+bete | giant spider on a rock
+bete | warhorse in barding
+bete | giant toad with a long tongue
+bete | young dragon perched on a rock, wings folded
+bete | eight-legged basilisk lizard
+bete | shadow panther with tentacles on its shoulders
+bete | giant scorpion with raised tail
+bete | griffon with wings half open

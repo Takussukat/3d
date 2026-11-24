@@ -124,22 +124,30 @@ def encoder_folder():
 
 # --------------------------------------------------------------------------- bootstrap
 
+def batch_jobs():
+    """Travaux a enchainer : JOB['batch'] (liste de travaux partiels) ou JOB seul."""
+    common = {k: v for k, v in JOB.items() if k != 'batch'}
+    return [{**common, **item} for item in JOB.get('batch') or [{}]]
+
+
+def image_only(job):
+    return job['stop_after'] == 'image' or int(job['variants']) > 1
+
+
 def bootstrap():
-    if JOB['mode'] not in ('text', 'image'):
-        raise ValueError(f"mode inconnu : {JOB['mode']}")
-    if JOB['mode'] == 'text' and not JOB['prompt']:
-        raise ValueError('Mode texte sans prompt')
-    image_only = JOB['stop_after'] == 'image' or int(JOB['variants']) > 1
-    if image_only and JOB['mode'] != 'text':
-        raise ValueError("stop_after='image' n'a de sens qu'en mode texte")
-    if not image_only:
+    """Installe une seule fois, puis lance chaque travail dans son propre processus (etape 'job')."""
+    jobs = batch_jobs()
+    for job in jobs:
+        if job['mode'] not in ('text', 'image'):
+            raise ValueError(f"mode inconnu : {job['mode']}")
+        if job['mode'] == 'text' and not job['prompt']:
+            raise ValueError(f"Mode texte sans prompt : {job.get('name')}")
+        if image_only(job) and job['mode'] != 'text':
+            raise ValueError("stop_after='image' / variantes n'ont de sens qu'en mode texte")
+    images_only = all(image_only(job) for job in jobs)
+    if not images_only:
         encoder_folder()
-    if JOB['mode'] == 'image':
-        found = list(pathlib.Path('/kaggle/input').rglob('reference.png'))
-        if len(found) != 1:
-            raise RuntimeError(f'Mode image : attendu un seul reference.png, trouve {found}')
-        shutil.copy(found[0], REFERENCE)
-    record('installing')
+    record('installing', batch=[job.get('name') for job in jobs])
 
     ROOT.mkdir(parents=True, exist_ok=True)
     run([sys.executable, '-m', 'pip', 'install', '-q', 'uv'])
@@ -153,31 +161,57 @@ def bootstrap():
          'zstandard', 'imageio', 'imageio-ffmpeg', 'matplotlib', 'kornia', 'rtree',
          'pymeshfix==0.17.1', 'manifold3d',
          'git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8'])
+    env = dict(os.environ)
+    if not images_only:
+        # Images seules : ni wheels, ni encodeur, ni TRELLIS.2.
+        wheels = []
+        for prefix in ('cumesh-', 'o_voxel-', 'flex_gemm-', 'nvdiffrast-'):
+            matches = list(pathlib.Path('/kaggle/input').rglob(prefix + '*.whl'))
+            if len(matches) != 1:
+                raise RuntimeError(f'Attendu une seule wheel {prefix}, trouve {matches}')
+            wheels.extend(matches)
+        run([python, '-m', 'pip', 'install', '--no-deps', *wheels])
+        repo = ROOT / 'TRELLIS.2'
+        if not repo.exists():
+            run(['git', 'clone', 'https://github.com/microsoft/TRELLIS.2.git', repo])
+        run(['git', 'checkout', REVISION], cwd=repo)
+        env['PYTHONPATH'] = str(repo)
+
     me = pathlib.Path(__file__).resolve()
-    if image_only:
-        # Test de l'etape SDXL seule : ni wheels, ni encodeur, ni TRELLIS.2.
+    results = []
+    for job in jobs:
         started = time.monotonic()
-        run([python, '-u', me], env=dict(os.environ, STL_JOB=json.dumps(JOB), STL_STAGE='image'),
-            timeout=1800)
+        try:
+            run([python, '-u', me], env=dict(env, STL_JOB=json.dumps(job), STL_STAGE='job'),
+                timeout=4 * 3600)
+            ok = True
+        except subprocess.SubprocessError as exc:    # un echec n'arrete pas le lot
+            print(f"Travail {job.get('name')} en echec : {exc}", flush=True)
+            ok = False
+        results.append(dict(name=job.get('name'), slug=slugify(job['name'] or job['prompt']),
+                            ok=ok, seconds=round(time.monotonic() - started)))
+    pathlib.Path('/kaggle/working/batch_summary.json').write_text(json.dumps(results, indent=2))
+    print(json.dumps(dict(status='batch_finished', results=results)), flush=True)
+
+
+def run_job():
+    """Un travail : image(s) SDXL, puis TRELLIS.2 et reparation, chacun dans son processus."""
+    python, me = sys.executable, pathlib.Path(__file__).resolve()
+    env = dict(os.environ, STL_JOB=json.dumps(JOB))
+    started = time.monotonic()
+    if JOB['mode'] == 'image':
+        name = JOB.get('input_image') or 'reference.png'
+        found = list(pathlib.Path('/kaggle/input').rglob(name))
+        if len(found) != 1:
+            raise RuntimeError(f'Mode image : attendu un seul {name}, trouve {found}')
+        shutil.copy(found[0], REFERENCE)
+    if image_only(JOB):
+        run([python, '-u', me], env=dict(env, STL_STAGE='image'), timeout=1800)
         record('finished', file='summary.json', stopped_after='image',
                variants=int(JOB['variants']),
                files=sorted(p.name for p in OUT.iterdir() if p.is_file()),
                total_seconds=round(time.monotonic() - started))
         return
-    wheels = []
-    for prefix in ('cumesh-', 'o_voxel-', 'flex_gemm-', 'nvdiffrast-'):
-        matches = list(pathlib.Path('/kaggle/input').rglob(prefix + '*.whl'))
-        if len(matches) != 1:
-            raise RuntimeError(f'Attendu une seule wheel {prefix}, trouve {matches}')
-        wheels.extend(matches)
-    run([python, '-m', 'pip', 'install', '--no-deps', *wheels])
-    repo = ROOT / 'TRELLIS.2'
-    if not repo.exists():
-        run(['git', 'clone', 'https://github.com/microsoft/TRELLIS.2.git', repo])
-    run(['git', 'checkout', REVISION], cwd=repo)
-
-    env = dict(os.environ, PYTHONPATH=str(repo), STL_JOB=json.dumps(JOB))
-    started = time.monotonic()
     if JOB['mode'] == 'text':
         run([python, '-u', me], env=dict(env, STL_STAGE='image'), timeout=1800)
     run([python, '-u', me], env=dict(env, STL_STAGE='infer'), timeout=10800)
@@ -190,7 +224,7 @@ def bootstrap():
     files = sorted(p.name for p in OUT.iterdir() if p.is_file())
     record('finished', file='summary.json', files=files,
            total_seconds=round(time.monotonic() - started),
-           repaired=REPAIRED_STL.exists())
+           repaired=REPAIRED_STL.exists(), with_base=BASE_STL.exists())
 
 
 # --------------------------------------------------------------------------- etape image
@@ -698,7 +732,7 @@ def add_base(figure, diameter, height=3.2, bevel=0.8, sink=0.6):
 
 # --------------------------------------------------------------------------- point d'entree
 
-STAGES = dict(image=make_image, infer=infer, repair=repair)
+STAGES = dict(job=run_job, image=make_image, infer=infer, repair=repair)
 
 if __name__ == '__main__':
     stage = os.environ.get('STL_STAGE')
