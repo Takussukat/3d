@@ -62,6 +62,42 @@ CHUNK = 65536
 BACKGROUND_MODEL = 'ZhengPeng7/BiRefNet'   # licence MIT, usage commercial autorise
 
 ROOT = pathlib.Path('/kaggle/temp/stl-factory')
+# Environnement Python du venv (source unique : installation en ligne et preparation hors ligne).
+TORCH_PACKAGES = ['torch==2.6.0', 'torchvision==0.21.0', 'xformers==0.0.29.post3']
+PIP_PACKAGES = [
+    'transformers==4.57.1', 'accelerate', 'diffusers>=0.30,<0.36', 'pillow', 'opencv-python-headless',
+    'easydict', 'tqdm', 'scipy', 'trimesh', 'safetensors', 'huggingface_hub<1', 'einops', 'timm',
+    'plyfile', 'zstandard', 'imageio', 'imageio-ffmpeg', 'matplotlib', 'kornia', 'rtree',
+    'pymeshfix==0.17.1', 'manifold3d',
+    'git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8']
+# Modeles telecharges pour le mode hors ligne : depot -> fichiers utiles (motifs).
+TRELLIS_REPO = 'microsoft/TRELLIS.2-4B'
+TRELLIS_CKPTS = ['ss_flow_img_dit_1_3B_64_bf16', 'shape_dec_next_dc_f16c32_fp16',
+                 'slat_flow_img2shape_dit_1_3B_512_bf16', 'slat_flow_img2shape_dit_1_3B_1024_bf16']
+OFFLINE_MODELS = {
+    TRELLIS_REPO: ['pipeline.json'] + [f'ckpts/{c}.{e}' for c in TRELLIS_CKPTS for e in ('json', 'safetensors')],
+    'microsoft/TRELLIS-image-large': [f'ckpts/ss_dec_conv3d_16l8_fp16.{e}' for e in ('json', 'safetensors')],
+    'stabilityai/stable-diffusion-xl-base-1.0': [
+        'model_index.json', 'scheduler/*', 'tokenizer/*', 'tokenizer_2/*', '*/config.json',
+        'unet/diffusion_pytorch_model.fp16.safetensors', 'text_encoder/model.fp16.safetensors',
+        'text_encoder_2/model.fp16.safetensors'],
+    'madebyollin/sdxl-vae-fp16-fix': ['config.json', 'diffusion_pytorch_model.safetensors'],
+    'ZhengPeng7/BiRefNet': ['*.json', '*.py', 'model.safetensors'],
+}
+ENV_TAR = next(pathlib.Path('/kaggle/input').rglob('stl-factory-env.tar'), None) \
+    if pathlib.Path('/kaggle/input').is_dir() else None
+MODELS_DIR = next((p.parent for p in pathlib.Path('/kaggle/input').rglob('offline-models.json')), None) \
+    if pathlib.Path('/kaggle/input').is_dir() else None
+if MODELS_DIR:
+    os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+
+
+def model_path(repo):
+    """Dossier local du modele en mode hors ligne, sinon l'identifiant Hugging Face."""
+    if MODELS_DIR and (MODELS_DIR / repo).is_dir():
+        return str(MODELS_DIR / repo)
+    return repo
+
 OUT = pathlib.Path('/kaggle/working') / SLUG
 OUT.mkdir(parents=True, exist_ok=True)
 REFERENCE = OUT / 'reference.png'
@@ -130,6 +166,74 @@ def encoder_folder():
 
 # --------------------------------------------------------------------------- bootstrap
 
+def install(with_trellis=True):
+    """Prepare le venv Python 3.10 (et TRELLIS.2). Hors ligne : extrait l'archive preparee par le
+    kernel <user>/stl-factory-env ; sinon installe depuis Internet. Renvoie (python, env)."""
+    python = ROOT / 'venv/bin/python'
+    env = dict(os.environ)
+    repo = ROOT / 'TRELLIS.2'
+    if ENV_TAR:
+        record('installing_offline', env_tar=str(ENV_TAR), models=str(MODELS_DIR))
+        run(['tar', '-xPf', ENV_TAR])               # chemins absolus : venv, TRELLIS.2, Python uv
+    else:
+        ROOT.mkdir(parents=True, exist_ok=True)
+        run([sys.executable, '-m', 'pip', 'install', '-q', 'uv'])
+        run([sys.executable, '-m', 'uv', 'venv', '--seed', '--python', '3.10', ROOT / 'venv'])
+        run([python, '-m', 'pip', 'install', '-q', *TORCH_PACKAGES,
+             '--index-url', 'https://download.pytorch.org/whl/cu124'])
+        run([python, '-m', 'pip', 'install', '-q', *PIP_PACKAGES])
+    if with_trellis:
+        wheels = []
+        for prefix in ('cumesh-', 'o_voxel-', 'flex_gemm-', 'nvdiffrast-'):
+            matches = list(pathlib.Path('/kaggle/input').rglob(prefix + '*.whl'))
+            if len(matches) != 1:
+                raise RuntimeError(f'Attendu une seule wheel {prefix}, trouve {matches}')
+            wheels.extend(matches)
+        run([python, '-m', 'pip', 'install', '-q', '--no-deps', '--no-index', *wheels])
+        if not repo.exists():
+            run(['git', 'clone', 'https://github.com/microsoft/TRELLIS.2.git', repo])
+        run(['git', 'checkout', '-q', REVISION], cwd=repo)
+        env['PYTHONPATH'] = str(repo)
+    return python, env
+
+
+def prepare_env():
+    """Kernel CPU avec Internet : construit le venv et TRELLIS.2, archive pour le mode hors ligne."""
+    install(with_trellis=False)
+    repo = ROOT / 'TRELLIS.2'
+    run(['git', 'clone', 'https://github.com/microsoft/TRELLIS.2.git', repo])
+    run(['git', 'checkout', '-q', REVISION], cwd=repo)
+    uv_python = subprocess.run([sys.executable, '-m', 'uv', 'python', 'dir'], capture_output=True,
+                               text=True, check=True).stdout.strip()
+    target = pathlib.Path('/kaggle/working/stl-factory-env.tar')
+    run(['tar', '-cPf', target, ROOT / 'venv', repo, uv_python])
+    check = subprocess.run([ROOT / 'venv/bin/python', '-c',
+                            'import torch, diffusers, transformers, trimesh, manifold3d, utils3d; '
+                            'print(torch.__version__, torch.version.cuda)'],
+                           capture_output=True, text=True)
+    record('env_ready', file='summary.json', tar_gb=round(target.stat().st_size / 1e9, 2),
+           uv_python=uv_python, check=(check.stdout + check.stderr).strip()[-300:])
+
+
+def prepare_models():
+    """Kernel CPU avec Internet : telecharge les fichiers utiles des modeles (OFFLINE_MODELS).
+    Le decodeur de structure (TRELLIS-image-large) est place sous le dossier TRELLIS.2, la ou
+    Pipeline.from_pretrained le cherche en local (chemin relatif de pipeline.json)."""
+    from huggingface_hub import snapshot_download
+    base = pathlib.Path('/kaggle/working/models')
+    sizes = {}
+    for repo, patterns in OFFLINE_MODELS.items():
+        target = base / repo
+        if repo == 'microsoft/TRELLIS-image-large':
+            target = base / TRELLIS_REPO / repo
+        snapshot_download(repo, allow_patterns=patterns, local_dir=target)
+        shutil.rmtree(target / '.cache', ignore_errors=True)
+        sizes[repo] = round(sum(f.stat().st_size for f in target.rglob('*') if f.is_file()) / 1e9, 2)
+        print(repo, sizes[repo], 'Go', flush=True)
+    (base / 'offline-models.json').write_text(json.dumps(dict(sizes_gb=sizes, files=OFFLINE_MODELS), indent=2))
+    record('models_ready', file='summary.json', sizes_gb=sizes, total_gb=round(sum(sizes.values()), 2))
+
+
 def batch_jobs():
     """Travaux a enchainer : JOB['batch'] (liste de travaux partiels) ou JOB seul."""
     common = {k: v for k, v in JOB.items() if k != 'batch'}
@@ -155,33 +259,7 @@ def bootstrap():
         encoder_folder()
     record('installing', batch=[job.get('name') for job in jobs])
 
-    ROOT.mkdir(parents=True, exist_ok=True)
-    run([sys.executable, '-m', 'pip', 'install', '-q', 'uv'])
-    run([sys.executable, '-m', 'uv', 'venv', '--seed', '--python', '3.10', ROOT / 'venv'])
-    python = ROOT / 'venv/bin/python'
-    run([python, '-m', 'pip', 'install', '-q', 'torch==2.6.0', 'torchvision==0.21.0',
-         'xformers==0.0.29.post3', '--index-url', 'https://download.pytorch.org/whl/cu124'])
-    run([python, '-m', 'pip', 'install', '-q', 'transformers==4.57.1', 'accelerate',
-         'diffusers>=0.30,<0.36', 'pillow', 'opencv-python-headless', 'easydict', 'tqdm',
-         'scipy', 'trimesh', 'safetensors', 'huggingface_hub<1', 'einops', 'timm', 'plyfile',
-         'zstandard', 'imageio', 'imageio-ffmpeg', 'matplotlib', 'kornia', 'rtree',
-         'pymeshfix==0.17.1', 'manifold3d',
-         'git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8'])
-    env = dict(os.environ)
-    if not images_only:
-        # Images seules : ni wheels, ni encodeur, ni TRELLIS.2.
-        wheels = []
-        for prefix in ('cumesh-', 'o_voxel-', 'flex_gemm-', 'nvdiffrast-'):
-            matches = list(pathlib.Path('/kaggle/input').rglob(prefix + '*.whl'))
-            if len(matches) != 1:
-                raise RuntimeError(f'Attendu une seule wheel {prefix}, trouve {matches}')
-            wheels.extend(matches)
-        run([python, '-m', 'pip', 'install', '--no-deps', *wheels])
-        repo = ROOT / 'TRELLIS.2'
-        if not repo.exists():
-            run(['git', 'clone', 'https://github.com/microsoft/TRELLIS.2.git', repo])
-        run(['git', 'checkout', REVISION], cwd=repo)
-        env['PYTHONPATH'] = str(repo)
+    python, env = install(with_trellis=not images_only)
 
     me = pathlib.Path(__file__).resolve()
     results = []
@@ -242,12 +320,14 @@ def make_image():
 
     record('generating_image')
     # Le VAE SDXL d'origine produit des NaN (images noires) en fp16 ; celui-ci est corrige.
-    vae = AutoencoderKL.from_pretrained('madebyollin/sdxl-vae-fp16-fix', torch_dtype=torch.float16)
+    vae = AutoencoderKL.from_pretrained(model_path('madebyollin/sdxl-vae-fp16-fix'),
+                                        torch_dtype=torch.float16)
     kwargs = dict(vae=vae, torch_dtype=torch.float16, use_safetensors=True)
     try:
-        pipe = StableDiffusionXLPipeline.from_pretrained(JOB['image_model'], variant='fp16', **kwargs)
+        pipe = StableDiffusionXLPipeline.from_pretrained(model_path(JOB['image_model']), variant='fp16',
+                                                         **kwargs)
     except (OSError, ValueError):
-        pipe = StableDiffusionXLPipeline.from_pretrained(JOB['image_model'], **kwargs)
+        pipe = StableDiffusionXLPipeline.from_pretrained(model_path(JOB['image_model']), **kwargs)
     pipe.to('cuda')
     pipe.enable_vae_slicing()
     prompt = JOB['prompt'].strip().rstrip('.') + STYLE['suffix']
@@ -314,7 +394,7 @@ def infer():
     Trellis2ImageTo3DPipeline.model_names_to_load = [
         'sparse_structure_flow_model', 'sparse_structure_decoder',
         'shape_slat_flow_model_512', 'shape_slat_flow_model_1024', 'shape_slat_decoder']
-    pipe = Pipeline.from_pretrained.__func__(Trellis2ImageTo3DPipeline, 'microsoft/TRELLIS.2-4B')
+    pipe = Pipeline.from_pretrained.__func__(Trellis2ImageTo3DPipeline, model_path(TRELLIS_REPO))
     cfg = pipe._pretrained_args
     for stage in ('sparse_structure', 'shape_slat'):
         spec = cfg[stage + '_sampler']
@@ -326,7 +406,7 @@ def infer():
     # Detourage : BiRefNet public (licence MIT). Le modele configure par Microsoft,
     # briaai/RMBG-2.0, est sous licence non commerciale : ne pas l'utiliser pour des STL vendus.
     background_model = BACKGROUND_MODEL
-    pipe.rembg_model = BiRefNet(background_model)
+    pipe.rembg_model = BiRefNet(model_path(background_model))
     pipe.low_vram = True
     pipe._device = torch.device('cuda:0')
     for name, model in pipe.models.items():
@@ -771,7 +851,14 @@ STAGES = dict(job=run_job, image=make_image, infer=infer, repair=repair)
 if __name__ == '__main__':
     stage = os.environ.get('STL_STAGE')
     try:
-        STAGES[stage]() if stage else bootstrap()
+        if stage:
+            STAGES[stage]()
+        elif JOB['mode'] == 'prepare_env':
+            prepare_env()
+        elif JOB['mode'] == 'prepare_models':
+            prepare_models()
+        else:
+            bootstrap()
     except Exception as exc:
         traceback.print_exc()
         (OUT / f'error_{stage or "bootstrap"}.txt').write_text(traceback.format_exc())

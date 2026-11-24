@@ -21,6 +21,8 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 KERNEL_SOURCE = HERE / 'kernel' / 'main.py'
 MARKER = '# @@JOB@@'
+# Kernels de preparation du mode hors ligne (sorties montees dans le kernel principal).
+OFFLINE_KERNELS = {'prepare_env': 'stl-factory-env', 'prepare_models': 'stl-factory-models'}
 
 
 def kaggle_user():
@@ -45,8 +47,16 @@ def kaggle(*args, dry=False, check=True):
     return output if result.returncode == 0 else None
 
 
-def build_kernel(job, user, args):
-    """Copie main.py avec le travail integre, plus les metadonnees du kernel."""
+def offline_ready(user, args):
+    """Vrai si les deux kernels de preparation ont termine (mode hors ligne utilisable)."""
+    if getattr(args, 'en_ligne', False):
+        return False
+    return all(kernel_state(f'{user}/{slug}') == 'complete' for slug in OFFLINE_KERNELS.values())
+
+
+def build_kernel(job, user, args, kernel=None, offline=False):
+    """Copie main.py avec le travail integre, plus les metadonnees du kernel.
+    Hors ligne : sans Internet, avec les sorties des kernels de preparation en entree."""
     source = KERNEL_SOURCE.read_text(encoding='utf-8')
     lines = [line for line in source.splitlines() if line.rstrip().endswith(MARKER)]
     if len(lines) != 1:
@@ -54,21 +64,28 @@ def build_kernel(job, user, args):
     embedded = f'JOB = json.loads({json.dumps(job, ensure_ascii=False)!r})  {MARKER}'
     source = source.replace(lines[0], embedded)
 
-    build = HERE / 'build' / args.kernel
+    kernel = kernel or args.kernel
+    build = HERE / 'build' / kernel
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True)
     (build / 'main.py').write_text(source, encoding='utf-8')
     datasets = [f'{user}/{args.wheels_dataset}', f'{user}/{args.encoder_dataset}']
+    preparing = job['mode'] in OFFLINE_KERNELS
     items = [{**job, **item} for item in job.get('batch') or [{}]]
     if all(item.get('stop_after') == 'image' for item in items):
         datasets = []                      # images seules : aucun dataset requis
     if any(item['mode'] == 'image' for item in items):
         datasets.append(f'{user}/{args.input_dataset}')
+    if preparing:
+        datasets = []
+    kernels = [f'{user}/{slug}' for slug in OFFLINE_KERNELS.values()] if offline else []
     metadata = dict(
-        id=f'{user}/{args.kernel}', title=args.kernel.replace('-', ' ').title(),
+        id=f'{user}/{kernel}', title=kernel.replace('-', ' ').title(),
         code_file='main.py', language='python', kernel_type='script', is_private=True,
-        enable_gpu=True, enable_tpu=False, enable_internet=True, machine_shape='NvidiaTeslaT4',
-        dataset_sources=datasets, competition_sources=[], kernel_sources=[], model_sources=[])
+        enable_gpu=not preparing, enable_tpu=False, enable_internet=not offline,
+        dataset_sources=datasets, competition_sources=[], kernel_sources=kernels, model_sources=[])
+    if not preparing:
+        metadata['machine_shape'] = 'NvidiaTeslaT4'
     (build / 'kernel-metadata.json').write_text(json.dumps(metadata, indent=2))
     return build
 
@@ -184,7 +201,7 @@ def run_batch(args, user, kernel_id):
     job = dict(common, mode='image' if images else 'text', batch=batch)
     if images:
         upload_image(None, user, args, files=images)
-    build = build_kernel(job, user, args)
+    build = build_kernel(job, user, args, offline=offline_ready(user, args))
     slug = slug_of(argparse.Namespace(name=args.name, source=None))
     print(f'Lot pret : {len(batch)} travaux, kernel {build}  (sortie : {slug})')
     kaggle('kernels', 'push', '-p', build, dry=args.dry_run)
@@ -210,6 +227,8 @@ def main():
     parser.add_argument('--encoder-dataset', default='dinov3-official-encoder')
     parser.add_argument('--input-dataset', default='stl-factory-input')
     parser.add_argument('--out', type=pathlib.Path, default=HERE / 'resultats')
+    parser.add_argument('--en-ligne', action='store_true',
+                        help="forcer le mode avec Internet meme si le mode hors ligne est pret")
     sub = parser.add_subparsers(dest='command', required=True)
     for command, help_text in (('texte', 'description en texte (anglais conseille)'),
                                ('image', "chemin d'une image de l'objet")):
@@ -247,6 +266,9 @@ def main():
     p.add_argument('--finesse', type=int, choices=[1024, 1536], default=1024)
     p.add_argument('--no-wait', action='store_true')
     p.add_argument('--dry-run', action='store_true')
+    p = sub.add_parser('preparer-hors-ligne',
+                       help="une fois : prepare venv et modeles (2 kernels CPU) pour tourner sans Internet")
+    p.add_argument('--dry-run', action='store_true')
     sub.add_parser('statut')
     p = sub.add_parser('recuperer')
     p.add_argument('--name', required=True)
@@ -254,6 +276,13 @@ def main():
 
     user = kaggle_user()
     kernel_id = f'{user}/{args.kernel}'
+    if args.command == 'preparer-hors-ligne':
+        for mode, slug in OFFLINE_KERNELS.items():
+            build = build_kernel(dict(mode=mode, name=slug), user, args, kernel=slug)
+            kaggle('kernels', 'push', '-p', build, dry=args.dry_run)
+        print('Suivi : python stl_factory.py statut (ou kaggle kernels status <user>/stl-factory-env, '
+              '<user>/stl-factory-models). Ensuite, les lots tournent sans Internet.')
+        return
     if args.command == 'statut':
         print(kernel_state(kernel_id))
         return
@@ -286,7 +315,7 @@ def main():
         upload_image(image, user, args)
     slug = slug_of(argparse.Namespace(name=job['name'], source=job.get('prompt')))
 
-    build = build_kernel(job, user, args)
+    build = build_kernel(job, user, args, offline=offline_ready(user, args))
     print(f'Kernel pret : {build}  (sortie : {slug})')
     kaggle('kernels', 'push', '-p', build, dry=args.dry_run)
     if args.dry_run or args.no_wait:
