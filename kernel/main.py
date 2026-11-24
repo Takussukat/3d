@@ -511,18 +511,25 @@ def split_pinched_edges(vertices, faces, gap):
         return f, faces[f, k], faces[f, (k + 1) % 3], faces[f, (k + 2) % 3]
     f, a, b, cf = corners(fwd)
     g, _, _, cg = corners(bwd)                           # g : b->a, sommet oppose cg
+    # Un triangle touchant deux aretes pincees ne doit etre coupe qu'une fois par passe :
+    # on ne garde que les paires dont les deux triangles sont libres (make_manifold repasse).
+    used = np.bincount(np.r_[f, g], minlength=len(faces))
+    free = (used[f] == 1) & (used[g] == 1)
+    if not free.any():
+        free[0] = True
+    f, a, b, cf, g, cg = f[free], a[free], b[free], cf[free], g[free], cg[free]
     va, vb = vertices[a], vertices[b]
     nf = np.cross(vb - va, vertices[cf] - va); ng = np.cross(va - vb, vertices[cg] - vb)
     inward = (nf / np.linalg.norm(nf, axis=1, keepdims=True)
               + ng / np.linalg.norm(ng, axis=1, keepdims=True))
     inward /= np.maximum(np.linalg.norm(inward, axis=1, keepdims=True), 1e-12)
-    mid = np.arange(len(vertices), len(vertices) + len(fwd))
+    mid = np.arange(len(vertices), len(vertices) + len(f))
     vertices = np.vstack([vertices, (va + vb) / 2 - gap * inward])
     keep = np.ones(len(faces), bool); keep[f] = keep[g] = False
     faces = np.vstack([faces[keep],
                        np.c_[a, mid, cf], np.c_[mid, b, cf],      # f = (a, b, cf) coupee en deux
                        np.c_[b, mid, cg], np.c_[mid, a, cg]])     # g = (b, a, cg) coupee en deux
-    return vertices, faces, len(fwd)
+    return vertices, faces, len(f)
 
 
 def make_manifold(vertices, faces, gap=0.002, min_fraction=0.001):
@@ -537,8 +544,14 @@ def make_manifold(vertices, faces, gap=0.002, min_fraction=0.001):
     m = trimesh.util.concatenate(kept)
     v, f, moved = split_vertices(np.asarray(m.vertices), np.asarray(m.faces, dtype=np.int64), gap)
     m = trimesh.Trimesh(v, f, process=True)                 # fusion comme a la relecture d'un STL
-    v, f, pinched = split_pinched_edges(np.asarray(m.vertices), np.asarray(m.faces, dtype=np.int64), gap)
-    return trimesh.Trimesh(v, f, process=True), dict(
+    pinched = 0
+    for _ in range(10):                                     # jusqu'a ce qu'il ne reste rien
+        v, f, count = split_pinched_edges(np.asarray(m.vertices), np.asarray(m.faces, dtype=np.int64), gap)
+        m = trimesh.Trimesh(v, f, process=True)
+        pinched += count
+        if not count:
+            break
+    return m, dict(
         fragments_removed=len(parts) - len(kept), vertices_split=moved, edges_split=pinched)
 
 
