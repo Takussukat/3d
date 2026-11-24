@@ -19,6 +19,9 @@ corriger dans l'environnement « 3d ».
 
 ## 1. Choisir 4 figurines
 
+**Garde** : si `catalogue/historique.csv` contient déjà des lignes datées DATE, la production du
+jour est faite : ne rien lancer, le dire dans le compte rendu et s'arrêter.
+
 - Lire `catalogue/historique.csv` (déjà publiées) et `catalogue/idees.txt`.
 - Prendre 4 concepts **jamais publiés**, de **catégories différentes** (par exemple un héros, un
   monstre, une grande créature, une bête ou un PNJ). Si la liste s'épuise, inventer des concepts du
