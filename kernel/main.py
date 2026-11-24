@@ -724,6 +724,11 @@ def add_base(figure, diameter, height=3.2, bevel=0.8, sink=0.6):
     figure.apply_translation([-cx, -cy, height - sink - bottom])
     feet_radius = float(np.linalg.norm(feet[:, :2] - [cx, cy], axis=1).max())
     merged = trimesh.boolean.union([figure, disc], engine='manifold')
+    # Des pointes (griffes, poils) qui effleurent le dessus du socle donnent des micro-eclats
+    # separes (loup du 2026-11-24 : 4 morceaux de 20 a 120 faces) : on les retire.
+    parts = merged.split(only_watertight=False)
+    biggest = max(len(part.faces) for part in parts)
+    merged = trimesh.util.concatenate([part for part in parts if len(part.faces) >= 0.01 * biggest])
     stats = mesh_stats(merged)
     ok = bool(merged.is_volume and stats['nonmanifold_edges'] == 0
               and len(merged.split(only_watertight=False)) == 1)
