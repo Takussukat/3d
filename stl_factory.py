@@ -48,8 +48,10 @@ def kaggle(*args, dry=False, check=True):
 
 
 def offline_ready(user, args):
-    """Vrai si les deux kernels de preparation ont termine (mode hors ligne utilisable)."""
-    if getattr(args, 'en_ligne', False):
+    """Vrai si --hors-ligne est demande et que les deux kernels de preparation ont termine.
+    Par defaut : mode avec Internet (valide en production) ; le hors ligne calait au chargement
+    des modeles le 2026-11-24 (diagnostic en cours)."""
+    if not getattr(args, 'hors_ligne', False):
         return False
     return all(kernel_state(f'{user}/{slug}') == 'complete' for slug in OFFLINE_KERNELS.values())
 
@@ -227,8 +229,8 @@ def main():
     parser.add_argument('--encoder-dataset', default='dinov3-official-encoder')
     parser.add_argument('--input-dataset', default='stl-factory-input')
     parser.add_argument('--out', type=pathlib.Path, default=HERE / 'resultats')
-    parser.add_argument('--en-ligne', action='store_true',
-                        help="forcer le mode avec Internet meme si le mode hors ligne est pret")
+    parser.add_argument('--hors-ligne', action='store_true',
+                        help="experimental : sans Internet, avec les sorties de preparer-hors-ligne")
     sub = parser.add_subparsers(dest='command', required=True)
     for command, help_text in (('texte', 'description en texte (anglais conseille)'),
                                ('image', "chemin d'une image de l'objet")):
