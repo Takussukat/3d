@@ -846,7 +846,12 @@ def close_small_holes(mesh, max_edges=30):
         closed += 1
     if not new_faces:
         return mesh, 0
-    return trimesh.Trimesh(mesh.vertices, np.vstack([faces, new_faces]), process=True), closed
+    # Un eventail peut recouvrir exactement un triangle existant (trou deja borde par une face
+    # en double) : les triangles presents deux fois s'annulent (production du 2026-11-25).
+    faces = np.vstack([faces, new_faces])
+    _, inverse, counts = np.unique(np.sort(faces, axis=1), axis=0, return_inverse=True, return_counts=True)
+    faces = faces[counts[inverse.ravel()] == 1]
+    return trimesh.Trimesh(mesh.vertices, faces, process=True), closed
 
 
 def add_base(figure, diameter, height=3.2, bevel=0.8, sink=0.6):

@@ -19,8 +19,15 @@ corriger dans l'environnement « 3d ».
 
 ## 1. Choisir 4 figurines
 
-**Garde** : si `catalogue/historique.csv` contient déjà des lignes datées DATE, la production du
-jour est faite : ne rien lancer, le dire dans le compte rendu et s'arrêter.
+**Historique** : la référence est Kaggle, pas seulement Git (une session planifiée peut ne pas
+avoir le droit de pousser). Lister `kaggle datasets list --mine -s figurines` ; pour chaque dataset
+`figurines-AAAA-MM-JJ` absent de `catalogue/historique.csv`, lire ses figurines avec
+`kaggle datasets download yassineblhr/figurines-AAAA-MM-JJ -f index.json -p build/historique`
+et les considérer comme publiées (les ajouter à l'historique local).
+
+**Garde** : si le dataset `figurines-DATE` existe déjà sur Kaggle, ou si `catalogue/historique.csv`
+contient des lignes datées DATE, la production du jour est faite : ne rien lancer, le dire dans le
+compte rendu et s'arrêter.
 
 - Lire `catalogue/historique.csv` (déjà publiées) et `catalogue/idees.txt`.
 - Prendre 4 concepts **jamais publiés**, de **catégories différentes** (par exemple un héros, un
@@ -100,7 +107,8 @@ git commit -m "Figurines du DATE : <noms>"
 git push -u origin claude/lucid-turing-9tgcqa
 ```
 
-Seuls ces petits fichiers vont dans Git ; les STL et images restent sur Kaggle.
+Seuls ces petits fichiers vont dans Git ; les STL et images restent sur Kaggle. Si le push est
+refusé (403), le signaler sans s'y attarder : l'historique de référence est sur Kaggle (index.json).
 
 ## 8. Compte rendu
 
