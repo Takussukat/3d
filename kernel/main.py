@@ -33,6 +33,7 @@ DEFAULTS = dict(
     guidance=7.0,
     simplify_faces=None,         # plafond de triangles ; None = 3 M en 1024, 6 M en 1536
     project_back=0.9,            # recolle les sommets remailles sur la surface TRELLIS (0 = non)
+    relief_mm=0.0,               # > 0 : relief fin guide par la texture TRELLIS (amplitude max en mm)
     resolution=1024,             # 1024 ou 1536 (cascade 1536 : memes modeles, details plus fins)
     stop_after=None,             # 'image' : s'arrete apres reference.png (test SDXL)
     style='objet',               # 'objet' ou 'miniature' (voir STYLES)
@@ -73,7 +74,8 @@ PIP_PACKAGES = [
 # Modeles telecharges pour le mode hors ligne : depot -> fichiers utiles (motifs).
 TRELLIS_REPO = 'microsoft/TRELLIS.2-4B'
 TRELLIS_CKPTS = ['ss_flow_img_dit_1_3B_64_bf16', 'shape_dec_next_dc_f16c32_fp16',
-                 'slat_flow_img2shape_dit_1_3B_512_bf16', 'slat_flow_img2shape_dit_1_3B_1024_bf16']
+                 'slat_flow_img2shape_dit_1_3B_512_bf16', 'slat_flow_img2shape_dit_1_3B_1024_bf16',
+                 'slat_flow_imgshape2tex_dit_1_3B_1024_bf16', 'tex_dec_next_dc_f16c32_fp16']
 OFFLINE_MODELS = {
     TRELLIS_REPO: ['pipeline.json'] + [f'ckpts/{c}.{e}' for c in TRELLIS_CKPTS for e in ('json', 'safetensors')],
     'microsoft/TRELLIS-image-large': [f'ckpts/ss_dec_conv3d_16l8_fp16.{e}' for e in ('json', 'safetensors')],
@@ -125,8 +127,9 @@ STYLES = dict(
     # chaines) et le socle (on ajoute le notre).
     miniature=dict(
         base_mm=25,
-        suffix=(', 32mm tabletop miniature, grey resin sculpt, bold silhouette, chunky details, '
-                'full body, front view, centered, plain grey background, studio lighting'),
+        suffix=(', 32mm tabletop miniature, grey resin sculpt, bold silhouette, crisp engraved details, '
+                'fine surface texture, full body, front view, centered, plain grey background, '
+                'studio lighting'),
         negative=('base, pedestal, scenery, multiple figures, cropped, cut off feet, '
                   'thin loose hair strands, wispy fur, floating particles, smoke, fire, chains, '
                   'transparent, glowing, painted colors, photo, text, watermark, blurry, lowres, '
@@ -392,16 +395,19 @@ def infer():
 
     record('loading_models')
     # La cascade 1024 de Microsoft utilise les modeles de forme 512 et 1024.
+    relief = float(JOB['relief_mm']) > 0
     Trellis2ImageTo3DPipeline.model_names_to_load = [
         'sparse_structure_flow_model', 'sparse_structure_decoder',
-        'shape_slat_flow_model_512', 'shape_slat_flow_model_1024', 'shape_slat_decoder']
+        'shape_slat_flow_model_512', 'shape_slat_flow_model_1024', 'shape_slat_decoder'] + (
+        ['tex_slat_flow_model_1024', 'tex_slat_decoder'] if relief else [])
     pipe = Pipeline.from_pretrained.__func__(Trellis2ImageTo3DPipeline, model_path(TRELLIS_REPO))
     cfg = pipe._pretrained_args
-    for stage in ('sparse_structure', 'shape_slat'):
+    for stage in ('sparse_structure', 'shape_slat') + (('tex_slat',) if relief else ()):
         spec = cfg[stage + '_sampler']
         setattr(pipe, stage + '_sampler', getattr(samplers, spec['name'])(**spec['args']))
         setattr(pipe, stage + '_sampler_params', spec['params'])
     pipe.shape_slat_normalization = cfg['shape_slat_normalization']
+    pipe.tex_slat_normalization = cfg['tex_slat_normalization']
     pipe.image_cond_model = DinoV3FeatureExtractor(str(encoder_folder()))
     from trellis2.pipelines.rembg import BiRefNet
     # Detourage : BiRefNet public (licence MIT). Le modele configure par Microsoft,
@@ -445,9 +451,22 @@ def infer():
             raise RuntimeError(f'Resolution de generation inattendue : {actual_resolution}')
         torch.cuda.empty_cache()
         record('decoding_shape')
+        tex_slat = None
+        if relief:
+            record('sampling_texture')
+            tex_slat = pipe.sample_tex_slat(cond_hr, pipe.models['tex_slat_flow_model_1024'], latent)
+            torch.cuda.empty_cache()
         meshes, _subs = pipe.decode_shape_slat(latent, RESOLUTION)
         vertices = meshes[0].vertices.cpu().numpy()
         faces = meshes[0].faces.cpu().numpy()
+        texture = None
+        if relief:
+            record('decoding_texture')
+            voxels = next(iter(pipe.decode_tex_slat(tex_slat, _subs)))
+            # Couleurs sur la grille de la forme (origine -0.5, voxel 1/RESOLUTION), gardees en CPU.
+            texture = dict(coords=voxels.coords[:, 1:].int().cpu(), feats=voxels.feats.float().cpu(),
+                           shape=list(voxels.spatial_shape))
+            del voxels, tex_slat
     if not np.isfinite(vertices).all() or len(faces) == 0:
         raise RuntimeError('Le decodeur a renvoye un maillage invalide ou vide')
     del latent, cond, cond_hr, coords, meshes, _subs, pipe, model
@@ -488,20 +507,73 @@ def infer():
     torch.cuda.empty_cache()
     gpu_mesh.simplify(MAX_FACES, verbose=True)
     v, f = gpu_mesh.read()
+    del gpu_mesh
+    colors, relief_info = None, None
+    if texture is not None:
+        colors = sample_texture(v, texture)
     mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy(), process=False)
+    if colors is not None:
+        record('relief', vertices=len(mesh.vertices))
+        relief_info = apply_relief(mesh, colors, float(JOB['relief_mm']) * mesh.extents.max() / SIZE)
+        mesh.visual.vertex_colors = np.c_[np.clip(colors[:, :3] * 255, 0, 255), np.full(len(colors), 255)].astype(np.uint8)
     # TRELLIS.2 sort deja en Z vers le haut (verifie sur un rendu : pieds en bas). Plus grande
     # dimension = SIZE mm, objet centre en X/Y et pose sur le plateau (Z min = 0).
     mesh.apply_scale(SIZE / float(mesh.extents.max()))
     low, high = mesh.bounds
     mesh.apply_translation([-(low[0] + high[0]) / 2, -(low[1] + high[1]) / 2, -low[2]])
     mesh.export(RAW_STL)
-    mesh.export(OUT / f'{SLUG}.glb')
+    mesh.export(OUT / f'{SLUG}.glb')                 # en couleur si la texture a ete generee
     record('mesh_ready', vertices=len(mesh.vertices), faces=len(mesh.faces), raw=raw_stats,
-           max_faces=MAX_FACES, projection=projection,
+           max_faces=MAX_FACES, projection=projection, relief=relief_info,
            watertight=bool(mesh.is_watertight), winding_consistent=bool(mesh.is_winding_consistent),
            bounds_mm=mesh.bounds.tolist(), elapsed_seconds=time.monotonic() - started,
            peak_cuda_allocated_gb=torch.cuda.max_memory_allocated() / 1024**3,
            stl=RAW_STL.name, print_ready=False)
+
+
+def sample_texture(vertices, texture):
+    """Couleur TRELLIS (base_color, metallic, roughness, alpha) a chaque sommet, par interpolation
+    trilineaire sur la grille de texture (comme o_voxel.postprocess.to_glb). Par blocs."""
+    import numpy as np
+    import torch
+    from flex_gemm.ops.grid_sample import grid_sample_3d
+    feats = texture['feats'].cuda()
+    coords = torch.cat([torch.zeros_like(texture['coords'][:, :1]), texture['coords']], dim=1).cuda()
+    shape = torch.Size([1, feats.shape[1], *texture['shape']])
+    out = np.empty((len(vertices), feats.shape[1]), dtype=np.float32)
+    for start in range(0, len(vertices), 1 << 20):
+        points = vertices[start:start + (1 << 20)].float().cuda()
+        grid = ((points + 0.5) * texture['shape'][0]).reshape(1, -1, 3)
+        values = grid_sample_3d(feats, coords, shape=shape, grid=grid, mode='trilinear')
+        out[start:start + len(points)] = values.reshape(-1, feats.shape[1]).cpu().numpy()
+    del feats, coords
+    torch.cuda.empty_cache()
+    return out
+
+
+def apply_relief(mesh, colors, amplitude, smoothing=40):
+    """Relief fin guide par la texture : la luminosite moins sa moyenne locale (passe-haut sur le
+    maillage) pousse chaque sommet le long de sa normale, au plus de `amplitude` (unites TRELLIS).
+    Sombre = creux (rainures, rayures, joints), clair = bosse. Modifie `mesh` sur place."""
+    import numpy as np
+    from scipy.sparse import coo_matrix, diags
+    luminance = colors[:, :3] @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    edges = mesh.edges_unique
+    n = len(mesh.vertices)
+    adjacency = coo_matrix((np.ones(2 * len(edges), dtype=np.float32),
+                            (np.r_[edges[:, 0], edges[:, 1]], np.r_[edges[:, 1], edges[:, 0]])),
+                           shape=(n, n)).tocsr()
+    degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    walk = diags(1.0 / np.maximum(degree, 1)) @ adjacency
+    smooth = luminance.copy()
+    for _ in range(smoothing):                        # moyenne locale (~ quelques dixiemes de mm)
+        smooth = 0.5 * smooth + 0.5 * (walk @ smooth)
+    detail = luminance - smooth
+    scale = float(np.percentile(np.abs(detail), 98)) or 1.0
+    offset = np.clip(detail / scale, -1, 1) * amplitude
+    mesh.vertices = mesh.vertices + mesh.vertex_normals * offset[:, None]
+    return dict(amplitude=amplitude, smoothing=smoothing,
+                mean_abs=float(np.abs(offset).mean()), p98_detail=scale)
 
 
 def project_to_source(vertices, source_v, source_f, bvh, ratio):
