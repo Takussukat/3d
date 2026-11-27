@@ -847,6 +847,20 @@ def repair():
                                            np.asarray(original.faces, dtype=np.int64))
     if candidate.volume < 0:
         candidate.invert()
+    # Cavites fermees a l'interieur (coquilles a volume negatif) : la figurine est remplie. Une
+    # bulle piege la resine et empeche le socle (capitaine hobgobelin du 2026-11-27 : 48 mm3).
+    # Volume signe de chaque morceau sans le copier (split() sature la memoire a 6 M de faces).
+    labels = trimesh.graph.connected_component_labels(candidate.face_adjacency, len(candidate.faces))
+    if labels.max() > 0:
+        tri = candidate.triangles
+        signed = np.einsum('ij,ij->i', tri[:, 0], np.cross(tri[:, 1], tri[:, 2])) / 6.0
+        volumes = np.bincount(labels, weights=signed)
+        cavities = np.flatnonzero(volumes < 0)
+        repair_info['cavities_filled'] = int(len(cavities))
+        if len(cavities):
+            keep = ~np.isin(labels, cavities)
+            candidate = trimesh.Trimesh(candidate.vertices, candidate.faces[keep], process=True)
+        del tri, signed, labels
     candidate_path = OUT / f'{SLUG}-repair-candidate-{SIZE_TAG}.stl'
     candidate.export(candidate_path)
     # Valide le STL exact, apres fusion des sommets coincidents.
